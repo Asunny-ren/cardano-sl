@@ -2,7 +2,6 @@
 
 module Pos.Binary.Core.Delegation () where
 
-import           Nub (ordNub)
 import           Universum
 
 import qualified Data.Set as S
@@ -27,6 +26,6 @@ instance Bi DlgPayload where
         (psks :: [ProxySKHeavy]) <- decode
         let asSet :: Set ProxySKHeavy
             asSet = S.fromList psks
-        when (length psks /= length (ordNub psks)) $
+        when (length psks /= S.size asSet) $
               fail "DlgPayload is not a set: it has duplicates"
         pure $ DlgPayload asSet
