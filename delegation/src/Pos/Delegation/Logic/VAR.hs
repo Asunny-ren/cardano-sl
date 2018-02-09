@@ -18,7 +18,7 @@ import           Control.Monad.Except (throwError)
 import           Control.Monad.Morph (hoist)
 import qualified Data.HashMap.Strict as HM
 import qualified Data.HashSet as HS
-import           Data.List ((\\))
+import qualified Data.Set as Set
 import qualified Data.Text.Buildable as B
 import           Formatting (bprint, build, sformat, (%))
 import           Mockable (CurrentTime, Mockable)
@@ -74,7 +74,7 @@ type ReverseTrans = HashMap StakeholderId (HashSet StakeholderId, HashSet Stakeh
 calculateTransCorrections
     :: forall m.
        (MonadUnliftIO m, MonadDBRead m, WithLogger m)
-    => HashSet DlgEdgeAction -> m SomeBatchOp
+    => Set DlgEdgeAction -> m SomeBatchOp
 calculateTransCorrections eActions = do
     -- Get the changeset and convert it to transitive ops.
     changeset <- transChangeset
@@ -173,7 +173,7 @@ calculateTransCorrections eActions = do
     transChangeset :: m TransChangeset
     transChangeset = do
         let xPoints :: [StakeholderId]
-            xPoints = map dlgEdgeActionIssuer $ HS.toList eActions
+            xPoints = map dlgEdgeActionIssuer $ Set.toList eActions
 
         -- Step 1.
         affected <- mconcat <$> mapM calculateLocalAf xPoints
@@ -259,7 +259,7 @@ calculateTransCorrections eActions = do
                 emptyCedeModifier &
                     cmPskMods .~
                         (HM.fromList $ map (\x -> (dlgEdgeActionIssuer x, x))
-                                           (HS.toList eActions))
+                                           (Set.toList eActions))
 
         in void $ StateT $ \s -> evalMapCede eActionsHM $ runStateT (loop iSId) s
 
@@ -341,7 +341,7 @@ dlgVerifyBlocks blocks = do
         -- We should delete all certs for people who are not richmen.
         let delFromCede = modPsk . DlgEdgeDel . addressHash . pskIssuerPk
         mapM_ delFromCede deletedPSKs
-        pure $ DlgUndo deletedPSKs prevThisEpochPosted
+        pure $ DlgUndo (Set.fromList deletedPSKs) prevThisEpochPosted
     verifyBlock richmen (Right blk) = do
         -- We assume here that issuers list doesn't contain
         -- duplicates (checked in payload construction).
@@ -352,7 +352,7 @@ dlgVerifyBlocks blocks = do
 
         ------------- [Payload] -------------
 
-        let proxySKs = getDlgPayload $ view mainBlockDlgPayload blk
+        let proxySKs = toList $ getDlgPayload $ view mainBlockDlgPayload blk
         let verifyPayload = do
                 let allIssuers = map pskIssuerPk proxySKs
 
@@ -397,7 +397,7 @@ dlgVerifyBlocks blocks = do
         -- We don't want to verify empty payload
         toRollback <- if null proxySKs then pure mempty else verifyPayload
 
-        pure $ DlgUndo toRollback mempty
+        pure $ DlgUndo (Set.fromList toRollback) mempty
 
 -- | Applies a sequence of definitely valid blocks to memory state and
 -- returns batchops. It works correctly only in case blocks don't
@@ -433,9 +433,9 @@ dlgApplyBlocks dlgBlunds = do
             dwTip .= headerHash block
         -- For genesis blocks, dlg undo is richmen that lost their stake.
         -- So we delete all these guys.
-        let edgeActions = map (DlgEdgeDel . addressHash . pskIssuerPk) duPsks
-        let edgeOp = SomeBatchOp $ map GS.PskFromEdgeAction edgeActions
-        transCorrections <- calculateTransCorrections $ HS.fromList edgeActions
+        let edgeActions = Set.map (DlgEdgeDel . addressHash . pskIssuerPk) duPsks
+        let edgeOp = SomeBatchOp $ map GS.PskFromEdgeAction $ toList edgeActions
+        transCorrections <- calculateTransCorrections edgeActions
         -- we also should delete all people who posted previous epoch
         let postedOp =
                 SomeBatchOp $ map GS.DelPostedThisEpoch $
@@ -446,12 +446,12 @@ dlgApplyBlocks dlgBlunds = do
         -- though it's duplicated in the undo.
         let proxySKs = getDlgPayload payload
         if null proxySKs then pure mempty else do
-            let issuers = map pskIssuerPk proxySKs
-                edgeActions = map pskToDlgEdgeAction proxySKs
+            let issuers = map pskIssuerPk $ toList proxySKs
+                edgeActions = Set.map pskToDlgEdgeAction proxySKs
                 postedThisEpoch = SomeBatchOp $ map (GS.AddPostedThisEpoch . addressHash) issuers
-            transCorrections <- calculateTransCorrections $ HS.fromList edgeActions
+            transCorrections <- calculateTransCorrections edgeActions
             let batchOps =
-                    SomeBatchOp (map GS.PskFromEdgeAction edgeActions) <>
+                    SomeBatchOp (map GS.PskFromEdgeAction $ toList edgeActions) <>
                     transCorrections <>
                     postedThisEpoch
             runDelegationStateAction $ do
@@ -480,14 +480,14 @@ dlgRollbackBlocks dlgBlunds = do
         pure $ SomeBatchOp $ map GS.AddPostedThisEpoch $ HS.toList duPrevEpochPosted
     rollbackBlund (ComponentBlockMain _ payload, DlgUndo{..}) = do
         let proxySKs = getDlgPayload payload
-            issuers = map pskIssuerPk proxySKs
-            backDeleted = issuers \\ map pskIssuerPk duPsks
-            edgeActions = map (DlgEdgeDel . addressHash) backDeleted
-                       <> map DlgEdgeAdd duPsks
-        transCorrections <- calculateTransCorrections $ HS.fromList edgeActions
-        let pskOp = SomeBatchOp (map GS.PskFromEdgeAction edgeActions) <> transCorrections
+            issuers = Set.map pskIssuerPk proxySKs
+            backDeleted = issuers `Set.difference` Set.map pskIssuerPk duPsks
+            edgeActions = Set.map (DlgEdgeDel . addressHash) backDeleted
+                       <> Set.map DlgEdgeAdd duPsks
+        transCorrections <- calculateTransCorrections edgeActions
+        let pskOp = SomeBatchOp (map GS.PskFromEdgeAction $ toList edgeActions) <> transCorrections
         -- we should also delete issuers from "posted this epoch already"
-        let postedOp = SomeBatchOp $ map (GS.DelPostedThisEpoch . addressHash) issuers
+        let postedOp = SomeBatchOp $ map (GS.DelPostedThisEpoch . addressHash) $ toList issuers
         pure $ pskOp <> postedOp
 
 -- | Normalizes the memory state after the rollback. Must be called
