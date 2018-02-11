@@ -32,9 +32,7 @@ import qualified Pos.Txp.DB as DB
 import           Pos.Txp.Settings.Global (TxpBlock, TxpBlund, TxpGlobalApplyMode,
                                           TxpGlobalRollbackMode, TxpGlobalSettings (..),
                                           TxpGlobalVerifyMode)
-import           Pos.Txp.Toil (DBToil, GenericToilModifier (..), GlobalApplyToilMode,
-                               StakesView (..), ToilModifier, ToilT, ToilVerFailure, applyToil,
-                               rollbackToil, runDBToil, runToilTGlobal, verifyToil)
+import           Pos.Txp.Toil (StakesView (..), applyToil, rollbackToil, verifyToil)
 import           Pos.Util.AssertMode (inAssertMode)
 import           Pos.Util.Chrono (NE, NewestFirst (..), OldestFirst (..))
 import qualified Pos.Util.Modifier as MM

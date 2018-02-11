@@ -5,23 +5,26 @@
 
 module Pos.Txp.Toil.Types
        ( Utxo
+       , UtxoLookup
+       , UtxoModifier
        , formatUtxo
        , utxoF
+       , utxoToModifier
        , GenesisUtxo (..)
        , _GenesisUtxo
+
+       , StakesView (..)
+       , StakesLookup
+       , svStakes
+       , svTotal
 
        , TxFee(..)
        , MemPool (..)
        , mpLocalTxs
        , mpSize
        , TxMap
-       , StakesView (..)
-       , svStakes
-       , svTotal
        , UndoMap
-       , UtxoModifier
        , AddrCoinMap
-       , utxoToModifier
        , applyUtxoModToAddrCoinMap
        , GenericToilModifier (..)
        , ToilModifier
@@ -56,6 +59,12 @@ import qualified Pos.Util.Modifier as MM
 -- output) pairs.
 type Utxo = Map TxIn TxOutAux
 
+-- | Type of function to look up an entry in 'Utxo'.
+type UtxoLookup = TxIn -> Maybe TxOutAux
+
+-- | All modifications (additions and deletions) to be applied to 'Utxo'.
+type UtxoModifier = MM.MapModifier TxIn TxOutAux
+
 -- | Format 'Utxo' map for showing
 formatUtxo :: Utxo -> Builder
 formatUtxo = mapBuilderJson . M.toList
@@ -63,6 +72,9 @@ formatUtxo = mapBuilderJson . M.toList
 -- | Specialized formatter for 'Utxo'.
 utxoF :: Format r (Utxo -> r)
 utxoF = later formatUtxo
+
+utxoToModifier :: Utxo -> UtxoModifier
+utxoToModifier = foldl' (flip $ uncurry MM.insert) mempty . M.toList
 
 -- | Wrapper for genesis utxo.
 newtype GenesisUtxo = GenesisUtxo
@@ -83,6 +95,9 @@ newtype TxFee = TxFee Coin
 ----------------------------------------------------------------------------
 -- StakesView
 ----------------------------------------------------------------------------
+
+-- | Type of function to look up an entry in stakes map.
+type StakesLookup = StakeholderId -> Maybe Coin
 
 data StakesView = StakesView
     { _svStakes :: !(HashMap StakeholderId Coin)
@@ -116,15 +131,11 @@ instance Default MemPool where
         }
 
 ----------------------------------------------------------------------------
--- UtxoModifier, UndoMap and AddrCoinsMap
+-- UndoMap and AddrCoinsMap
 ----------------------------------------------------------------------------
 
-type UtxoModifier = MM.MapModifier TxIn TxOutAux
 type UndoMap = HashMap TxId TxUndo
 type AddrCoinMap = HashMap Address Coin
-
-utxoToModifier :: Utxo -> UtxoModifier
-utxoToModifier = foldl' (flip $ uncurry MM.insert) mempty . M.toList
 
 -- | Takes utxo modifier and address-coin map with correspodning utxo
 -- and applies utxo modifier to map.
