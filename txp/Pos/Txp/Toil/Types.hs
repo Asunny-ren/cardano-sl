@@ -14,7 +14,6 @@ module Pos.Txp.Toil.Types
        , _GenesisUtxo
 
        , StakesView (..)
-       , StakesLookup
        , svStakes
        , svTotal
 
@@ -26,13 +25,6 @@ module Pos.Txp.Toil.Types
        , UndoMap
        , AddrCoinMap
        , applyUtxoModToAddrCoinMap
-       , GenericToilModifier (..)
-       , ToilModifier
-       , tmUtxo
-       , tmStakes
-       , tmMemPool
-       , tmUndos
-       , tmExtra
        ) where
 
 import           Universum
@@ -95,9 +87,6 @@ newtype TxFee = TxFee Coin
 ----------------------------------------------------------------------------
 -- StakesView
 ----------------------------------------------------------------------------
-
--- | Type of function to look up an entry in stakes map.
-type StakesLookup = StakeholderId -> Maybe Coin
 
 data StakesView = StakesView
     { _svStakes :: !(HashMap StakeholderId Coin)
@@ -182,22 +171,3 @@ applyUtxoModToAddrCoinMap modifier (addrCoins, utxo) = result
 
 instance Default UndoMap where
     def = mempty
-
-----------------------------------------------------------------------------
--- ToilModifier
-----------------------------------------------------------------------------
-
-data GenericToilModifier extension = ToilModifier
-    { _tmUtxo    :: !UtxoModifier
-    , _tmStakes  :: !StakesView
-    , _tmMemPool :: !MemPool
-    , _tmUndos   :: !UndoMap
-    , _tmExtra   :: !extension
-    }
-
-type ToilModifier = GenericToilModifier ()
-
-instance Default ext => Default (GenericToilModifier ext) where
-    def = ToilModifier mempty def def mempty def
-
-makeLenses ''GenericToilModifier

@@ -13,18 +13,18 @@ module Pos.Txp.Logic.Local
        , txGetPayload
 
        -- Utils to processing and nomralization tx
-       , ProcessTxContext (..)
-       , ptcExtra
        , buildProccessTxContext
        , TxProcessingMode
        , txProcessTransactionAbstract
-       , txNormalizeAbstract
+       -- , txNormalizeAbstract
        ) where
 
 import           Universum
 
 import           Control.Lens (makeLenses)
-import           Control.Monad.Except (MonadError (..), runExceptT)
+import           Control.Monad.Except (mapExceptT, runExceptT, throwError)
+import           Control.Monad.Reader (mapReaderT)
+import           Control.Monad.State.Strict (mapStateT)
 import           Data.Default (Default (def))
 import qualified Data.HashMap.Strict as HM
 import qualified Data.List.NonEmpty as NE
@@ -33,7 +33,7 @@ import           Formatting (build, sformat, (%))
 import           System.Wlog (NamedPureLogger, WithLogger, logDebug, logError, logWarning)
 
 import           Pos.Core (BlockVersionData, EpochIndex, HasConfiguration, HeaderHash, siEpoch)
-import           Pos.Core.Txp (Tx (..), TxAux (..), TxId)
+import           Pos.Core.Txp (Tx (..), TxAux (..), TxId, TxUndo)
 import           Pos.Crypto (WithHash (..))
 import           Pos.DB.Class (MonadDBRead, MonadGState (..))
 import qualified Pos.DB.GState.Common as GS
@@ -43,32 +43,10 @@ import           Pos.StateLock (Priority (..), StateLock, StateLockMetrics, with
 import           Pos.Txp.MemState (GenericTxpLocalData (..), GenericTxpLocalDataPure, MempoolExt,
                                    MonadTxpMem, TxpLocalWorkMode, askTxpMem, getLocalTxsMap,
                                    getUtxoModifier, modifyTxpLocalData, setTxpLocalData)
-import           Pos.Txp.Toil (DBToil, GenericToilModifier (..), MonadUtxoRead (..), ToilT,
-                               ToilVerFailure (..), Utxo, mpLocalTxs, normalizeToil, processTx,
-                               runDBToil, runToilTLocal, runToilTLocalExtra, utxoGetReader)
+import           Pos.Txp.Toil (LocalToilState (..), ToilVerFailure (..), Utxo, UtxoLookup,
+                               mpLocalTxs, normalizeToil, processTx)
 import           Pos.Txp.Topsort (topsortTxs)
 import           Pos.Util.Util (HasLens (..), HasLens')
-
--- Base context for tx processing in.
-data ProcessTxContext ext = ProcessTxContext
-    { _ptcAdoptedBVData :: !BlockVersionData
-    , _ptcUtxoBase      :: !Utxo
-    , _ptcExtra         :: ext
-    }
-
-makeLenses ''ProcessTxContext
-
-instance HasLens Utxo (ProcessTxContext ext) Utxo where
-    lensOf = ptcUtxoBase
-
--- Base monad for tx processing in.
-type ProcessTxMode ext = ReaderT (ProcessTxContext ext) (NamedPureLogger Identity)
-
-instance HasConfiguration => MonadUtxoRead (ProcessTxMode ext) where
-    utxoGet = utxoGetReader
-
-instance MonadGState (ProcessTxMode ext) where
-    gsAdoptedBVData = view ptcAdoptedBVData
 
 type TxpProcessTransactionMode ctx m =
     ( TxpLocalWorkMode ctx m
@@ -96,24 +74,30 @@ txProcessTransactionNoLock
        )
     => (TxId, TxAux) -> m (Either ToilVerFailure ())
 txProcessTransactionNoLock =
-    txProcessTransactionAbstract
-        buildProccessTxContext
-        processTx
+    txProcessTransactionAbstract buildProccessTxContext processTxHoisted
+  where
+    processTxHoisted ::
+           BlockVersionData
+        -> EpochIndex
+        -> (TxId, TxAux)
+        -> TxProcessingMode TxUndo
+    processTxHoisted bvd epoch tx =
+        mapExceptT (mapReaderT (mapStateT lift)) $ processTx bvd epoch tx
 
-type TxProcessingMode pext ext =
+type TxProcessingMode =
     ExceptT ToilVerFailure (
-        ToilT ext (
-            ReaderT (ProcessTxContext pext) (
+        ReaderT UtxoLookup (
+            StateT LocalToilState (
                 NamedPureLogger Identity
     )))
 
 txProcessTransactionAbstract
-    :: forall pext ext ctx m a .
+    :: forall ext ctx m a .
        ( TxpLocalWorkMode ctx m
        , MempoolExt m ~ ext
        )
-    => (TxAux -> m (ProcessTxContext pext))
-    -> (EpochIndex -> (TxId, TxAux) -> TxProcessingMode pext ext a)
+    => (TxAux -> m UtxoLookup)
+    -> (BlockVersionData -> EpochIndex -> (TxId, TxAux) -> TxProcessingMode a)
     -> (TxId, TxAux)
     -> m (Either ToilVerFailure ())
 txProcessTransactionAbstract buildPTxContext txAction itw@(txId, txAux) = reportTipMismatch $ runExceptT $ do
@@ -133,11 +117,12 @@ txProcessTransactionAbstract buildPTxContext txAction itw@(txId, txAux) = report
     -- 'StateLock' which we own inside this function.
     tipDB <- lift GS.getTip
     epoch <- siEpoch <$> (note ToilSlotUnknown =<< getCurrentSlot)
-    pctx <- lift $ buildPTxContext txAux
+    utxo <- lift $ buildPTxContext txAux
+    bvd <- gsAdoptedBVData
     pRes <-
         lift $
         modifyTxpLocalData $
-        processTransactionPure epoch pctx tipDB itw
+        processTransactionPure bvd epoch utxo tipDB itw
     -- We report 'ToilTipsMismatch' as an error, because usually it
     -- should't happen. If it happens, it's better to look at logs.
     case pRes of
@@ -149,25 +134,30 @@ txProcessTransactionAbstract buildPTxContext txAction itw@(txId, txAux) = report
                 (sformat ("Transaction is processed successfully: " %build) txId)
   where
     processTransactionPure
-        :: EpochIndex
-        -> ProcessTxContext pext
+        :: BlockVersionData
+        -> EpochIndex
+        -> UtxoLookup
         -> HeaderHash
         -> (TxId, TxAux)
         -> GenericTxpLocalDataPure ext
         -> NamedPureLogger Identity (Either ToilVerFailure (), GenericTxpLocalDataPure ext)
-    processTransactionPure curEpoch pctx tipDB tx txld@(uv, mp, undo, tip, extra)
+    processTransactionPure bvd curEpoch utxo tipDB tx txld@(um, mp, undo, tip, extra)
         | tipDB /= tip = pure (Left $ ToilTipsMismatch tipDB tip, txld)
         | otherwise = do
-            res :: (Either ToilVerFailure a, GenericToilModifier ext) <-
-                    flip runReaderT pctx $
-                    runToilTLocalExtra uv mp undo extra $
+            let initialState = LocalToilState { _ltsMemPool = mp
+                                              , _ltsUtxoModifier = um
+                                              , _ltsUndos = undo
+                                              }
+            res :: (Either ToilVerFailure a, LocalToilState) <-
+                    usingStateT initialState $
+                    usingReaderT utxo $
                     runExceptT $
-                    txAction curEpoch tx
+                    txAction bvd curEpoch tx
             case res of
                 (Left er, _) -> pure (Left er, txld)
-                (Right _, ToilModifier {..}) -> pure
+                (Right _, LocalToilState {..}) -> pure
                     ( Right ()
-                    , (_tmUtxo, _tmMemPool, _tmUndos, tip, _tmExtra))
+                    , (_ltsUtxoModifier, _ltsMemPool, _ltsUndos, tip, undefined))
     -- REPORT:ERROR Tips mismatch in txp.
     reportTipMismatch action = do
         res <- action
@@ -179,28 +169,26 @@ buildProccessTxContext
     :: forall m ctx.
        ( MonadIO m
        , MonadDBRead m
-       , MonadGState m
        , MonadTxpMem (MempoolExt m) ctx m
        )
-    => TxAux -> m (ProcessTxContext ())
-buildProccessTxContext txAux = do
-    let UnsafeTx {..} = taTx txAux
-    bvd <- gsAdoptedBVData
-    localUM <- getUtxoModifier @(MempoolExt m)
-    let runUM um = runToilTLocal um def mempty
-    (resolvedOuts, _) <- runDBToil $ runUM localUM $ mapM utxoGet _txInputs
-    -- Resolved are unspent transaction outputs corresponding to input
-    -- of given transaction.
-    let resolved =
-            M.fromList $
-            catMaybes $
-            toList $ NE.zipWith (liftM2 (,) . Just) _txInputs resolvedOuts
-    pure $
-        ProcessTxContext
-        { _ptcAdoptedBVData = bvd
-        , _ptcUtxoBase = resolved
-        , _ptcExtra    = ()
-        }
+    => TxAux -> m UtxoLookup
+buildProccessTxContext txAux = undefined -- do
+    -- let UnsafeTx {..} = taTx txAux
+    -- localUM <- getUtxoModifier @(MempoolExt m)
+    -- let runUM um = runToilTLocal um def mempty
+    -- (resolvedOuts, _) <- runDBToil $ runUM localUM $ mapM utxoGet _txInputs
+    -- -- Resolved are unspent transaction outputs corresponding to input
+    -- -- of given transaction.
+    -- let resolved =
+    --         M.fromList $
+    --         catMaybes $
+    --         toList $ NE.zipWith (liftM2 (,) . Just) _txInputs resolvedOuts
+    -- pure $
+    --     ProcessTxContext
+    --     { _ptcAdoptedBVData = bvd
+    --     , _ptcUtxoBase = resolved
+    --     , _ptcExtra    = ()
+    --     }
 
 type TxpNormalizeMempoolMode ctx m =
     ( TxpLocalWorkMode ctx m
@@ -214,28 +202,28 @@ type TxpNormalizeMempoolMode ctx m =
 txNormalize
     :: TxpNormalizeMempoolMode ctx m
     => m ()
-txNormalize = txNormalizeAbstract (\e txs -> normalizeToil e (HM.toList txs))
+txNormalize = undefined -- txNormalizeAbstract (\e txs -> normalizeToil e (HM.toList txs))
 
-txNormalizeAbstract
-    :: ( TxpLocalWorkMode ctx m
-       , MonadSlots ctx m
-       , Default (MempoolExt m)
-       )
-    => (EpochIndex -> HashMap TxId TxAux -> ToilT (MempoolExt m) (DBToil m) ())
-    -> m ()
-txNormalizeAbstract normalizeAction = getCurrentSlot >>= \case
-    Nothing -> do
-        tip <- GS.getTip
-        -- Clear and update tip
-        setTxpLocalData (mempty, def, mempty, tip, def)
-    Just (siEpoch -> epoch) -> do
-        utxoTip <- GS.getTip
-        localTxs <- getLocalTxsMap
-        ToilModifier {..} <-
-            runDBToil $
-            snd <$> runToilTLocalExtra mempty def mempty def
-            (normalizeAction epoch localTxs)
-        setTxpLocalData (_tmUtxo, _tmMemPool, _tmUndos, utxoTip, _tmExtra)
+-- txNormalizeAbstract
+--     :: ( TxpLocalWorkMode ctx m
+--        , MonadSlots ctx m
+--        , Default (MempoolExt m)
+--        )
+--     => (EpochIndex -> HashMap TxId TxAux -> ToilT (MempoolExt m) (DBToil m) ())
+--     -> m ()
+-- txNormalizeAbstract normalizeAction = getCurrentSlot >>= \case
+--     Nothing -> do
+--         tip <- GS.getTip
+--         -- Clear and update tip
+--         setTxpLocalData (mempty, def, mempty, tip, def)
+--     Just (siEpoch -> epoch) -> do
+--         utxoTip <- GS.getTip
+--         localTxs <- getLocalTxsMap
+--         ToilModifier {..} <-
+--             runDBToil $
+--             snd <$> runToilTLocalExtra mempty def mempty def
+--             (normalizeAction epoch localTxs)
+--         setTxpLocalData (_tmUtxo, _tmMemPool, _tmUndos, utxoTip, _tmExtra)
 
 -- | Get 'TxPayload' from mempool to include into a new block which
 -- will be based on the given tip. In something goes wrong, empty

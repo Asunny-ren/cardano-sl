@@ -1,9 +1,13 @@
+{-# LANGUAGE DeriveFunctor #-}
+
 -- | Some monads used in Toil and primitive actions.
 
 module Pos.Txp.Toil.Monadic
        (
          -- * Monadic Utxo
          UtxoM
+       -- , runUtxoM
+       -- , evalUtxoM
        , utxoGet
        , utxoPut
        , utxoDel
@@ -20,7 +24,10 @@ module Pos.Txp.Toil.Monadic
 
          -- * Monadic global Toil
        , GlobalToilState (..)
+       , defGlobalToilState
+       , GlobalToilEnv (..)
        , GlobalToilM
+       , runGlobalToilM
        , getStake
        , getTotalStake
        , setStake
@@ -33,15 +40,18 @@ module Pos.Txp.Toil.Monadic
 
 import           Universum
 
-import           Control.Lens (at, magnify, makeLenses, zoom, (%=), (+=), (.=))
+import           Control.Lens (at, makeLenses, zoom, (%=), (+=), (.=))
+import           Control.Monad.Free (Free (..), foldFree, hoistFree)
 import           Control.Monad.Reader (mapReaderT)
+import           Control.Monad.State.Strict (mapStateT)
+import           Data.Default (def)
 import           Fmt ((+|), (|+))
-import           System.Wlog (NamedPureLogger)
+import           System.Wlog (NamedPureLogger, WithLogger, launchNamedPureLog)
 
 import           Pos.Core.Common (Coin, StakeholderId)
 import           Pos.Core.Txp (TxAux, TxId, TxIn, TxOutAux, TxUndo)
-import           Pos.Txp.Toil.Types (MemPool, StakesLookup, StakesView, UndoMap, UtxoLookup,
-                                     UtxoModifier, mpLocalTxs, mpSize, svStakes, svTotal)
+import           Pos.Txp.Toil.Types (MemPool, StakesView, UndoMap, UtxoLookup, UtxoModifier,
+                                     mpLocalTxs, mpSize, svStakes, svTotal)
 import qualified Pos.Util.Modifier as MM
 
 ----------------------------------------------------------------------------
@@ -50,6 +60,28 @@ import qualified Pos.Util.Modifier as MM
 
 -- | Utility monad which allows to lookup values in UTXO and modify it.
 type UtxoM = ReaderT UtxoLookup (State UtxoModifier)
+
+-- -- | Run 'UtxoM' action in some monad capable of getting 'TxOutAux'
+-- -- for 'TxIn'.
+-- runUtxoM ::
+--        forall m a. Monad m
+--     => UtxoModifier
+--     -> (TxIn -> m (Maybe TxOutAux))
+--     -> UtxoM a
+--     -> m (a, UtxoModifier)
+-- runUtxoM modifier getter = foldFree' . usingStateT modifier
+--   where
+--     foldFree' :: forall x. Free UtxoLookupF x -> m x
+--     foldFree' = foldFree $ \(UtxoLookupF txIn f) -> f <$> getter txIn
+
+-- -- | Version of 'runUtxoM' which discards final state.
+-- evalUtxoM ::
+--        forall m a. Monad m
+--     => UtxoModifier
+--     -> (TxIn -> m (Maybe TxOutAux))
+--     -> UtxoM a
+--     -> m a
+-- evalUtxoM = fmap fst ... runUtxoM
 
 -- | Look up an entry in 'Utxo' considering 'UtxoModifier' stored
 -- inside 'State'.
@@ -109,28 +141,70 @@ memPoolSize = use $ ltsMemPool . mpSize
 -- Monad used for global Toil and some actions.
 ----------------------------------------------------------------------------
 
+-- | Type which parameterizes free monad with access to Stakes.
+data StakesLookupF a =
+    StakesLookupF StakeholderId
+                  (Maybe Coin -> a)
+    deriving (Functor)
+
 data GlobalToilState = GlobalToilState
     { _gtsUtxoModifier :: !UtxoModifier
     , _gtsStakesView   :: !StakesView
     }
 
+-- | Default 'GlobalToilState'.
+defGlobalToilState :: GlobalToilState
+defGlobalToilState =
+    GlobalToilState {_gtsUtxoModifier = mempty, _gtsStakesView = def}
+
 makeLenses ''GlobalToilState
 
 data GlobalToilEnv = GlobalToilEnv
     { _gteUtxo       :: !UtxoLookup
-    , _gteStakes     :: !StakesLookup
     , _gteTotalStake :: !Coin
     }
 
 makeLenses ''GlobalToilEnv
 
 type GlobalToilM
-     = NamedPureLogger (ReaderT GlobalToilEnv (State GlobalToilState))
+     = NamedPureLogger (ReaderT GlobalToilEnv (StateT GlobalToilState (Free StakesLookupF)))
+
+-- | Run 'GlobalToilM' action in some monad capable of getting 'TxOutAux'
+-- for 'TxIn', getting stakeholders' stakes and logging.
+runGlobalToilM ::
+       forall m a. (WithLogger m)
+    => GlobalToilEnv
+    -> GlobalToilState
+    -> (TxIn -> m (Maybe TxOutAux))
+    -> (StakeholderId -> m (Maybe Coin))
+    -> GlobalToilM a
+    -> m (a, GlobalToilState)
+runGlobalToilM env gts utxoGetter stakeGetter = undefined -- launchNamedPureLog hoist'
+  -- where
+  --   foldFree' :: forall x. Free GlobalLookupF x -> m x
+  --   foldFree' =
+  --       foldFree $ \case
+  --           GlobalLookupUtxo (UtxoLookupF txIn f) -> f <$> utxoGetter txIn
+  --           GlobalLookupStakes sId f -> f <$> stakeGetter sId
+  --   hoist' ::
+  --          forall f. Functor f
+  --       => ReaderT GlobalToilEnv (StateT GlobalToilState (Free GlobalLookupF)) (f a)
+  --       -> m (f (a, GlobalToilState))
+  --   hoist' = shuffle . foldFree' . usingStateT gts . usingReaderT env
+  --   shuffle ::
+  --          forall f. Functor f
+  --       => m (f a, GlobalToilState)
+  --       -> m (f (a, GlobalToilState))
+  --   shuffle action = do
+  --       (fa, st) <- action
+  --       return $ (, st) <$> fa
 
 getStake :: StakeholderId -> GlobalToilM (Maybe Coin)
-getStake id = lift $ do
-    stakesLookup <- view gteStakes
-    (<|> stakesLookup id) <$> (use (gtsStakesView . svStakes . at id))
+getStake id =
+    (<|>) <$> lift (use (gtsStakesView . svStakes . at id)) <*> baseLookup id
+  where
+    baseLookup :: StakeholderId -> GlobalToilM (Maybe Coin)
+    baseLookup i = lift $ lift $ lift $ Free $ StakesLookupF i pure
 
 getTotalStake :: GlobalToilM Coin
 getTotalStake =
@@ -155,10 +229,11 @@ utxoMToLocalToilM = mapReaderT f
 
 -- | Lift 'UtxoM' action to 'GlobalToilM'.
 utxoMToGlobalToilM :: UtxoM a -> GlobalToilM a
-utxoMToGlobalToilM = lift . magnify gteUtxo . mapReaderT f
-  where
-    f :: forall a. State UtxoModifier a -> State GlobalToilState a
-    f = zoom gtsUtxoModifier
+utxoMToGlobalToilM = undefined
+  --   lift . lift . zoom gtsUtxoModifier . mapStateT hoistFree'
+  -- where
+  --   hoistFree' :: forall a. Free UtxoLookupF a -> Free GlobalLookupF a
+  --   hoistFree' = hoistFree GlobalLookupUtxo
 
 
 

@@ -84,6 +84,7 @@ library
                      , exceptions
                      , fmt >= 0.4
                      , formatting
+                     , free
                      , generic-arbitrary
                      , hashable
                      , lens
