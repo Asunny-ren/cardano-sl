@@ -57,7 +57,7 @@ data VerifyTxUtxoRes = VerifyTxUtxoRes
     , vturFee  :: !(Maybe TxFee)
     -- ^ Fee of the verified transaction. Can be 'Nothing' if there
     -- are inputs of unknown types.
-    }
+    } deriving (Show)
 
 -- | CHECK: Verify Tx correctness using 'UtxoLookup'.
 -- Specifically there are the following checks:

@@ -10,6 +10,7 @@ module Pos.Txp.Toil.Types
        , formatUtxo
        , utxoF
        , utxoToModifier
+       , utxoToLookup
        , GenesisUtxo (..)
        , _GenesisUtxo
 
@@ -67,6 +68,9 @@ utxoF = later formatUtxo
 
 utxoToModifier :: Utxo -> UtxoModifier
 utxoToModifier = foldl' (flip $ uncurry MM.insert) mempty . M.toList
+
+utxoToLookup :: Utxo -> UtxoLookup
+utxoToLookup = flip M.lookup
 
 -- | Wrapper for genesis utxo.
 newtype GenesisUtxo = GenesisUtxo

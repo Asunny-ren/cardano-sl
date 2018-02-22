@@ -6,8 +6,9 @@ module Pos.Txp.Toil.Monadic
        (
          -- * Monadic Utxo
          UtxoM
-       -- , runUtxoM
-       -- , evalUtxoM
+       , runUtxoM
+       , evalUtxoM
+       , execUtxoM
        , utxoGet
        , utxoPut
        , utxoDel
@@ -61,27 +62,17 @@ import qualified Pos.Util.Modifier as MM
 -- | Utility monad which allows to lookup values in UTXO and modify it.
 type UtxoM = ReaderT UtxoLookup (State UtxoModifier)
 
--- -- | Run 'UtxoM' action in some monad capable of getting 'TxOutAux'
--- -- for 'TxIn'.
--- runUtxoM ::
---        forall m a. Monad m
---     => UtxoModifier
---     -> (TxIn -> m (Maybe TxOutAux))
---     -> UtxoM a
---     -> m (a, UtxoModifier)
--- runUtxoM modifier getter = foldFree' . usingStateT modifier
---   where
---     foldFree' :: forall x. Free UtxoLookupF x -> m x
---     foldFree' = foldFree $ \(UtxoLookupF txIn f) -> f <$> getter txIn
+-- | Run 'UtxoM' action using 'UtxoLookup' and 'UtxoModifier'.
+runUtxoM :: UtxoModifier -> UtxoLookup -> UtxoM a -> (a, UtxoModifier)
+runUtxoM modifier getter = usingState modifier . usingReaderT getter
 
--- -- | Version of 'runUtxoM' which discards final state.
--- evalUtxoM ::
---        forall m a. Monad m
---     => UtxoModifier
---     -> (TxIn -> m (Maybe TxOutAux))
---     -> UtxoM a
---     -> m a
--- evalUtxoM = fmap fst ... runUtxoM
+-- | Version of 'runUtxoM' which discards final state.
+evalUtxoM :: UtxoModifier -> UtxoLookup -> UtxoM a -> a
+evalUtxoM = fst ... runUtxoM
+
+-- | Version of 'runUtxoM' which discards action's result.
+execUtxoM :: UtxoModifier -> UtxoLookup -> UtxoM a -> UtxoModifier
+execUtxoM = snd ... runUtxoM
 
 -- | Look up an entry in 'Utxo' considering 'UtxoModifier' stored
 -- inside 'State'.
