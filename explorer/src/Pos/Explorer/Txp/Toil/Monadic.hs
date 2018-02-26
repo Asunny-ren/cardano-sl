@@ -18,17 +18,22 @@ module Pos.Explorer.Txp.Toil.Monadic
        , putAddrBalance
        , delAddrBalance
        , putUtxoSum
+
+       , ELocalToilM
+       , txExtraMToELocalToilM
        ) where
 
 import           Universum
 
-import           Control.Lens (at, (%=), (.=))
+import           Control.Lens (at, magnify, zoom, (%=), (.=))
+import           Control.Monad.Reader (mapReaderT)
 import           System.Wlog (NamedPureLogger)
 
 import           Pos.Core (Address, Coin, TxId)
 import           Pos.Explorer.Core (AddrHistory, TxExtra)
 import           Pos.Explorer.Txp.Toil.Types (ExplorerExtraModifier, eemAddrBalances,
                                               eemAddrHistories, eemLocalTxsExtra, eemNewUtxoSum)
+import           Pos.Txp.Toil (LocalToilState, UtxoLookup)
 import qualified Pos.Util.Modifier as MM
 
 ----------------------------------------------------------------------------
@@ -82,3 +87,16 @@ delAddrBalance addr = eemAddrBalances %= MM.delete addr
 
 putUtxoSum :: Integer -> TxExtraM ()
 putUtxoSum utxoSum = eemNewUtxoSum .= Just utxoSum
+
+----------------------------------------------------------------------------
+-- Monad used for local Toil in Explorer.
+----------------------------------------------------------------------------
+
+type ELocalToilM
+     = ReaderT (UtxoLookup, TxExtraLookup) (
+       StateT  (LocalToilState, ExplorerExtraModifier) (
+       NamedPureLogger
+       Identity))
+
+txExtraMToELocalToilM :: TxExtraM a -> ELocalToilM a
+txExtraMToELocalToilM = mapReaderT (zoom _2) . magnify _2

@@ -21,12 +21,15 @@ import qualified Data.List.NonEmpty as NE
 import           Formatting (build, sformat, (%))
 import           System.Wlog (WithLogger, logError)
 
-import           Pos.Core (Address, Coin, EpochIndex, HeaderHash, Timestamp, mkCoin, sumCoins,
-                           unsafeAddCoin, unsafeSubCoin)
+import           Pos.Core (Address, BlockVersionData, Coin, EpochIndex, HeaderHash, Timestamp,
+                           mkCoin, sumCoins, unsafeAddCoin, unsafeSubCoin)
 import           Pos.Core.Txp (Tx (..), TxAux (..), TxId, TxOut (..), TxOutAux (..), TxUndo, _TxOut)
 import           Pos.Crypto (WithHash (..), hash)
 import           Pos.Explorer.Core (AddrHistory, TxExtra (..))
-import           Pos.Explorer.Txp.Toil.Monadic (TxExtraM, getAddrBalance, updateAddrHistory)
+import           Pos.Explorer.Txp.Toil.Monadic (ELocalToilM, TxExtraM, delAddrBalance, delTxExtra,
+                                                getAddrBalance, getAddrHistory, getUtxoSum,
+                                                putAddrBalance, putTxExtra, putUtxoSum,
+                                                txExtraMToELocalToilM, updateAddrHistory)
 import           Pos.Txp.Toil (ToilVerFailure (..))
 import qualified Pos.Txp.Toil as Txp
 import           Pos.Txp.Topsort (topsortTxs)
@@ -40,41 +43,41 @@ import           Pos.Util.Util (Sign (..))
 -- | Apply transactions from one block. They must be valid (for
 -- example, it implies topological sort).
 eApplyToil
-    :: EGlobalApplyToilMode m
+    :: Monad m
     => Maybe Timestamp
     -> [(TxAux, TxUndo)]
     -> HeaderHash
     -> m ()
-eApplyToil mTxTimestamp txun hh = do
-    Txp.applyToil txun
-    mapM_ applier $ zip [0..] txun
-  where
-    applier (i, (txAux, txUndo)) = do
-        let tx = taTx txAux
-            id = hash tx
-            newExtra = TxExtra (Just (hh, i)) mTxTimestamp txUndo
-        extra <- fromMaybe newExtra <$> getTxExtra id
-        putTxExtraWithHistory id extra $ getTxRelatedAddrs txAux txUndo
-        let balanceUpdate = getBalanceUpdate txAux txUndo
-        updateAddrBalances balanceUpdate
-        updateUtxoSumFromBalanceUpdate balanceUpdate
+eApplyToil mTxTimestamp txun hh = undefined --do
+  --   Txp.applyToil txun
+  --   mapM_ applier $ zip [0..] txun
+  -- where
+  --   applier (i, (txAux, txUndo)) = do
+  --       let tx = taTx txAux
+  --           id = hash tx
+  --           newExtra = TxExtra (Just (hh, i)) mTxTimestamp txUndo
+  --       extra <- fromMaybe newExtra <$> getTxExtra id
+  --       putTxExtraWithHistory id extra $ getTxRelatedAddrs txAux txUndo
+  --       let balanceUpdate = getBalanceUpdate txAux txUndo
+  --       updateAddrBalances balanceUpdate
+  --       updateUtxoSumFromBalanceUpdate balanceUpdate
 
 -- | Rollback transactions from one block.
-eRollbackToil :: EGlobalApplyToilMode m => [(TxAux, TxUndo)] -> m ()
-eRollbackToil txun = do
-    Txp.rollbackToil txun
-    mapM_ extraRollback $ reverse txun
-  where
-    extraRollback (txAux, txUndo) = do
-        delTxExtraWithHistory (hash (taTx txAux)) $
-          getTxRelatedAddrs txAux txUndo
-        let BalanceUpdate {..} = getBalanceUpdate txAux txUndo
-        let balanceUpdate = BalanceUpdate {
-            plusBalance = minusBalance,
-            minusBalance = plusBalance
-        }
-        updateAddrBalances balanceUpdate
-        updateUtxoSumFromBalanceUpdate balanceUpdate
+eRollbackToil :: Monad m => [(TxAux, TxUndo)] -> m ()
+eRollbackToil txun = undefined -- do
+  --   Txp.rollbackToil txun
+  --   mapM_ extraRollback $ reverse txun
+  -- where
+  --   extraRollback (txAux, txUndo) = do
+  --       delTxExtraWithHistory (hash (taTx txAux)) $
+  --         getTxRelatedAddrs txAux txUndo
+  --       let BalanceUpdate {..} = getBalanceUpdate txAux txUndo
+  --       let balanceUpdate = BalanceUpdate {
+  --           plusBalance = minusBalance,
+  --           minusBalance = plusBalance
+  --       }
+  --       updateAddrBalances balanceUpdate
+  --       updateUtxoSumFromBalanceUpdate balanceUpdate
 
 ----------------------------------------------------------------------------
 -- Local
@@ -82,25 +85,29 @@ eRollbackToil txun = do
 
 -- | Verify one transaction and also add it to mem pool and apply to utxo
 -- if transaction is valid.
-eProcessTx
-    :: (ELocalToilMode m, MonadError ToilVerFailure m)
-    => EpochIndex -> (TxId, TxAux) -> (TxUndo -> TxExtra) -> m ()
-eProcessTx curEpoch tx@(id, aux) createExtra = do
-    undo <- Txp.processTx curEpoch tx
-    let extra = createExtra undo
-    putTxExtraWithHistory id extra $ getTxRelatedAddrs aux undo
-    let balanceUpdate = getBalanceUpdate aux undo
-    updateAddrBalances balanceUpdate
-    updateUtxoSumFromBalanceUpdate balanceUpdate
+eProcessTx ::
+       BlockVersionData
+    -> EpochIndex
+    -> (TxId, TxAux)
+    -> (TxUndo -> TxExtra)
+    -> ELocalToilM ()
+eProcessTx bvd curEpoch tx@(id, aux) createExtra = do
+    undo <- undefined $ Txp.processTx bvd curEpoch tx
+    txExtraMToELocalToilM $ do
+        let extra = createExtra undo
+        putTxExtraWithHistory id extra $ getTxRelatedAddrs aux undo
+        let balanceUpdate = getBalanceUpdate aux undo
+        updateAddrBalances balanceUpdate
+        updateUtxoSumFromBalanceUpdate balanceUpdate
 
 -- | Get rid of invalid transactions.
 -- All valid transactions will be added to mem pool and applied to utxo.
 eNormalizeToil
-    :: ELocalToilMode m
+    :: Monad m
     => EpochIndex
     -> [(TxId, (TxAux, TxExtra))]
     -> m ()
-eNormalizeToil curEpoch txs = mapM_ normalize ordered
+eNormalizeToil curEpoch txs = undefined -- mapM_ normalize ordered
   where
     ordered = fromMaybe txs $ topsortTxs wHash txs
     wHash (i, (txAux, _)) = WithHash (taTx txAux) i
