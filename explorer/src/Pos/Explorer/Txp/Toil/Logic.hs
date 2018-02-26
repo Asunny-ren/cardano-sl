@@ -26,7 +26,7 @@ import           Pos.Core (Address, Coin, EpochIndex, HeaderHash, Timestamp, mkC
 import           Pos.Core.Txp (Tx (..), TxAux (..), TxId, TxOut (..), TxOutAux (..), TxUndo, _TxOut)
 import           Pos.Crypto (WithHash (..), hash)
 import           Pos.Explorer.Core (AddrHistory, TxExtra (..))
-import           Pos.Explorer.Txp.Toil.Class (MonadTxExtra (..), MonadTxExtraRead (..))
+import           Pos.Explorer.Txp.Toil.Monadic (TxExtraM, getAddrBalance, updateAddrHistory)
 import           Pos.Txp.Toil (ToilVerFailure (..))
 import qualified Pos.Txp.Toil as Txp
 import           Pos.Txp.Topsort (topsortTxs)
@@ -36,16 +36,6 @@ import           Pos.Util.Util (Sign (..))
 ----------------------------------------------------------------------------
 -- Global
 ----------------------------------------------------------------------------
-
-type EGlobalApplyToilMode m =
-    ( Txp.GlobalApplyToilMode m
-    , MonadTxExtra m
-    )
-
-type EGlobalVerifyToilMode m =
-    ( Txp.GlobalVerifyToilMode m
-    , MonadTxExtra m
-    )
 
 -- | Apply transactions from one block. They must be valid (for
 -- example, it implies topological sort).
@@ -90,11 +80,6 @@ eRollbackToil txun = do
 -- Local
 ----------------------------------------------------------------------------
 
-type ELocalToilMode m =
-    ( Txp.LocalToilMode m
-    , MonadTxExtra m
-    )
-
 -- | Verify one transaction and also add it to mem pool and apply to utxo
 -- if transaction is valid.
 eProcessTx
@@ -131,36 +116,22 @@ data BalanceUpdate = BalanceUpdate
     , plusBalance  :: [(Address, Coin)]
     }
 
-modifyAddrHistory
-    :: MonadTxExtra m
-    => (AddrHistory -> AddrHistory)
-    -> Address
-    -> m ()
-modifyAddrHistory f addr =
-    updateAddrHistory addr . f =<< getAddrHistory addr
+modifyAddrHistory :: (AddrHistory -> AddrHistory) -> Address -> TxExtraM ()
+modifyAddrHistory f addr = updateAddrHistory addr . f =<< getAddrHistory addr
 
-putTxExtraWithHistory
-    :: MonadTxExtra m
-    => TxId
-    -> TxExtra
-    -> NonEmpty Address
-    -> m ()
+putTxExtraWithHistory :: TxId -> TxExtra -> NonEmpty Address -> TxExtraM ()
 putTxExtraWithHistory id extra addrs = do
     putTxExtra id extra
     for_ addrs $ modifyAddrHistory $
         NewestFirst . (id :) . getNewestFirst
 
-delTxExtraWithHistory
-    :: MonadTxExtra m
-    => TxId
-    -> NonEmpty Address
-    -> m ()
+delTxExtraWithHistory :: TxId -> NonEmpty Address -> TxExtraM ()
 delTxExtraWithHistory id addrs = do
     delTxExtra id
     for_ addrs $ modifyAddrHistory $
         NewestFirst . delete id . getNewestFirst
 
-updateUtxoSumFromBalanceUpdate :: MonadTxExtra m => BalanceUpdate -> m ()
+updateUtxoSumFromBalanceUpdate :: BalanceUpdate -> TxExtraM ()
 updateUtxoSumFromBalanceUpdate balanceUpdate = do
     let plusChange  = sumCoins $ map snd $ plusBalance  balanceUpdate
         minusChange = sumCoins $ map snd $ minusBalance balanceUpdate
@@ -205,10 +176,10 @@ combineBalanceUpdates BalanceUpdate {..} =
     reducer (Nothing, Just minus) | minus /= mkCoin 0 = Just (Minus, minus)
     reducer _ = Nothing
 
-updateAddrBalances :: (MonadTxExtra m, WithLogger m) => BalanceUpdate -> m ()
+updateAddrBalances :: BalanceUpdate -> TxExtraM ()
 updateAddrBalances (combineBalanceUpdates -> updates) = mapM_ updater updates
   where
-    updater :: (MonadTxExtra m, WithLogger m) => (Address, (Sign, Coin)) -> m ()
+    updater :: (Address, (Sign, Coin)) -> TxExtraM ()
     updater (addr, (Plus, coin)) = do
         currentBalance <- fromMaybe (mkCoin 0) <$> getAddrBalance addr
         let newBalance = unsafeAddCoin currentBalance coin
