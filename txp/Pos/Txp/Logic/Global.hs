@@ -8,9 +8,8 @@ module Pos.Txp.Logic.Global
 
        -- * Helpers
        , ApplyBlocksSettings (..)
-       -- , applyBlocksWith
+       , applyBlocksWith
        , blundToAuxNUndo
-       -- , genericGlobalToilStateToBatch
        ) where
 
 import           Universum
