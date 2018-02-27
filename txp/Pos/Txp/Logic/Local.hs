@@ -38,12 +38,12 @@ import qualified Pos.DB.GState.Common as GS
 import           Pos.Reporting (reportError)
 import           Pos.Slotting (MonadSlots (..))
 import           Pos.StateLock (Priority (..), StateLock, StateLockMetrics, withStateLock)
-import           Pos.Txp.Logic.Common (buildUtxoLookup)
+import           Pos.Txp.Logic.Common (buildUtxo)
 import           Pos.Txp.MemState (GenericTxpLocalData (..), GenericTxpLocalDataPure, MempoolExt,
                                    MonadTxpMem, TxpLocalWorkMode, askTxpMem, getLocalTxsMap,
                                    getUtxoModifier, modifyTxpLocalData, setTxpLocalData)
-import           Pos.Txp.Toil (LocalToilM, LocalToilState (..), ToilVerFailure (..), UtxoLookup,
-                               mpLocalTxs, normalizeToil, processTx)
+import           Pos.Txp.Toil (LocalToilM, LocalToilState (..), ToilVerFailure (..), Utxo,
+                               UtxoLookup, mpLocalTxs, normalizeToil, processTx, utxoToLookup)
 import           Pos.Txp.Topsort (topsortTxs)
 import           Pos.Util.Util (HasLens')
 
@@ -85,8 +85,8 @@ txProcessTransactionNoLock ::
 txProcessTransactionNoLock =
     txProcessTransactionAbstract buildContext processTxHoisted
   where
-    buildContext :: TxAux -> m ()
-    buildContext _ = pure ()
+    buildContext :: Utxo -> TxAux -> m ()
+    buildContext _ _ = pure ()
 
     processTxHoisted ::
            BlockVersionData
@@ -98,7 +98,7 @@ txProcessTransactionNoLock =
 txProcessTransactionAbstract ::
        forall extraEnv extraState ctx m a.
        (TxpLocalWorkMode ctx m, MempoolExt m ~ extraState)
-    => (TxAux -> m extraEnv)
+    => (Utxo -> TxAux -> m extraEnv)
     -> (BlockVersionData -> EpochIndex -> (TxId, TxAux) -> ExceptT ToilVerFailure (ExtendedLocalToilM extraEnv extraState) a)
     -> (TxId, TxAux)
     -> m (Either ToilVerFailure ())
@@ -120,13 +120,14 @@ txProcessTransactionAbstract buildEnv txAction itw@(txId, txAux) = reportTipMism
     tipDB <- lift GS.getTip
     epoch <- siEpoch <$> (note ToilSlotUnknown =<< getCurrentSlot)
     utxoModifier <- getUtxoModifier
-    utxoLookup <- buildUtxoLookup utxoModifier [txAux]
-    extraEnv <- lift $ buildEnv txAux
+    utxo <- buildUtxo utxoModifier [txAux]
+    extraEnv <- lift $ buildEnv utxo txAux
     bvd <- gsAdoptedBVData
+    let env = (utxoToLookup utxo, extraEnv)
     pRes <-
         lift $
         modifyTxpLocalData $
-        processTransactionPure bvd epoch (utxoLookup, extraEnv) tipDB itw
+        processTransactionPure bvd epoch env tipDB itw
     -- We report 'ToilTipsMismatch' as an error, because usually it
     -- should't happen. If it happens, it's better to look at logs.
     case pRes of
@@ -178,8 +179,8 @@ txNormalize ::
 txNormalize =
     txNormalizeAbstract buildContext normalizeToilHoisted
   where
-    buildContext :: [TxAux] -> m ()
-    buildContext _ = pure ()
+    buildContext :: Utxo -> [TxAux] -> m ()
+    buildContext _ _ = pure ()
 
     normalizeToilHoisted ::
            BlockVersionData
@@ -191,7 +192,7 @@ txNormalize =
 
 txNormalizeAbstract ::
        (TxpLocalWorkMode ctx m, MempoolExt m ~ extraState, Default extraState)
-    => ([TxAux] -> m extraEnv)
+    => (Utxo -> [TxAux] -> m extraEnv)
     -> (BlockVersionData -> EpochIndex -> HashMap TxId TxAux -> ExtendedLocalToilM extraEnv extraState ())
     -> m ()
 txNormalizeAbstract buildEnv normalizeAction =
@@ -204,8 +205,8 @@ txNormalizeAbstract buildEnv normalizeAction =
             globalTip <- GS.getTip
             localTxs <- getLocalTxsMap
             let txAuxes = toList localTxs
-            utxo <- buildUtxoLookup mempty txAuxes
-            extraEnv <- buildEnv txAuxes
+            utxo <- buildUtxo mempty txAuxes
+            extraEnv <- buildEnv utxo txAuxes
             bvd <- gsAdoptedBVData
             let initialState =
                     LocalToilState
@@ -218,7 +219,7 @@ txNormalizeAbstract buildEnv normalizeAction =
                 execStateT
                     (runReaderT
                          (normalizeAction bvd epoch localTxs)
-                         (utxo, extraEnv))
+                         (utxoToLookup utxo, extraEnv))
                     (initialState, def)
             setTxpLocalData
                 ( _ltsUtxoModifier

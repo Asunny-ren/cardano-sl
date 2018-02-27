@@ -8,132 +8,83 @@ module Pos.Explorer.Txp.Local
        , eTxNormalize
        ) where
 
-import           Nub (ordNub)
 import           Universum
 
 import qualified Data.HashMap.Strict as HM
-import           System.Wlog (NamedPureLogger)
 
-import           Pos.Core (BlockVersionData, EpochIndex)
-import           Pos.Core.Txp (Tx (..), TxAux (..), TxId, toaOut, txOutAddress)
-import           Pos.DB.Class (MonadDBRead, MonadGState (..))
-import qualified Pos.Explorer.DB as ExDB
+import           Pos.Core (BlockVersionData, EpochIndex, Timestamp)
+import           Pos.Core.Txp (TxAux (..), TxId)
 import           Pos.Slotting (MonadSlots (getCurrentSlot), getSlotStart)
 import           Pos.StateLock (Priority (..), StateLock, StateLockMetrics, withStateLock)
 import           Pos.Txp.Logic.Local (ExtendedLocalToilM, txNormalizeAbstract,
                                       txProcessTransactionAbstract)
-import           Pos.Txp.MemState (MempoolExt, MonadTxpMem, TxpLocalWorkMode, getTxpExtra)
-import           Pos.Txp.Toil (ToilVerFailure (..))
-import           Pos.Util.Chrono (NewestFirst (..))
+import           Pos.Txp.MemState (MempoolExt, TxpLocalWorkMode, getTxpExtra)
+import           Pos.Txp.Toil (ToilVerFailure (..), Utxo)
 import qualified Pos.Util.Modifier as MM
 import           Pos.Util.Util (HasLens')
 
 import           Pos.Explorer.Core (TxExtra (..))
+import           Pos.Explorer.Txp.Common (buildExplorerExtraLookup)
 import           Pos.Explorer.Txp.Toil (ExplorerExtraLookup (..), ExplorerExtraModifier,
                                         eNormalizeToil, eProcessTx, eemLocalTxsExtra)
 
 
--- type ETxpLocalWorkMode ctx m =
---     ( TxpLocalWorkMode ctx m
---     , MempoolExt m ~ ExplorerExtra
---     )
+type ETxpLocalWorkMode ctx m =
+    ( TxpLocalWorkMode ctx m
+    , MempoolExt m ~ ExplorerExtraModifier
+    )
 
--- -- Base context for tx processing in explorer.
--- type EProcessTxContext = ProcessTxContext ExplorerExtraTxp
+eTxProcessTransaction ::
+       ( ETxpLocalWorkMode ctx m
+       , HasLens' ctx StateLock
+       , HasLens' ctx StateLockMetrics
+       )
+    => (TxId, TxAux)
+    -> m (Either ToilVerFailure ())
+eTxProcessTransaction itw =
+    withStateLock LowPriority "eTxProcessTransaction" $ \__tip -> eTxProcessTransactionNoLock itw
 
--- -- Base monad for tx processing in explorer.
--- type EProcessTxMode = ReaderT EProcessTxContext (NamedPureLogger Identity)
+eTxProcessTransactionNoLock ::
+       forall ctx m. (ETxpLocalWorkMode ctx m)
+    => (TxId, TxAux)
+    -> m (Either ToilVerFailure ())
+eTxProcessTransactionNoLock itw = getCurrentSlot >>= \case
+    Nothing   -> pure $ Left ToilSlotUnknown
+    Just slot -> do
+        -- First get the current @SlotId@ so we can calculate the time.
+        -- Then get when that @SlotId@ started and use that as a time for @Tx@.
+        mTxTimestamp <- getSlotStart slot
+        txProcessTransactionAbstract buildContext (processTx' mTxTimestamp) itw
+  where
+    buildContext :: Utxo -> TxAux -> m ExplorerExtraLookup
+    buildContext utxo = buildExplorerExtraLookup utxo . one
 
--- instance MonadTxExtraRead EProcessTxMode where
---     getTxExtra txId = HM.lookup txId . eetTxExtra <$> view ptcExtra
---     getAddrHistory addr =
---         HM.lookupDefault (NewestFirst []) addr . eetAddrHistories <$>
---         view ptcExtra
---     getAddrBalance addr =
---         HM.lookup addr . eetAddrBalances <$> view ptcExtra
---     getUtxoSum =
---         eetUtxoSum <$> view ptcExtra
-
--- eTxProcessTransaction
---     :: (ETxpLocalWorkMode ctx m, MonadMask m,
---         HasLens' ctx StateLock, HasLens' ctx StateLockMetrics)
---     => (TxId, TxAux) -> m (Either ToilVerFailure ())
--- eTxProcessTransaction itw =
---     withStateLock LowPriority "eTxProcessTransaction" $ \__tip -> eTxProcessTransactionNoLock itw
-
--- eTxProcessTransactionNoLock
---     :: ETxpLocalWorkMode ctx m
---     => (TxId, TxAux) -> m (Either ToilVerFailure ())
--- eTxProcessTransactionNoLock itw = getCurrentSlot >>= \case
---     Nothing   -> pure $ Left ToilSlotUnknown
---     Just slot -> do
---         -- First get the current @SlotId@ so we can calculate the time.
---         -- Then get when that @SlotId@ started and use that as a time for @Tx@.
---         mTxTimestamp <- getSlotStart slot
---         txProcessTransactionAbstract
---             buildEProcessTxContext
---             (\e tx -> eProcessTx e tx (TxExtra Nothing mTxTimestamp))
---             itw
-
--- buildEProcessTxContext
---     :: forall m ctx.
---        ( MonadIO m
---        , MonadDBRead m
---        , MonadGState m
---        , MonadTxpMem (MempoolExt m) ctx m
---        )
---     => TxAux -> m EProcessTxContext
--- buildEProcessTxContext txAux = do
---     ProcessTxContext{..} <- buildProccessTxContext txAux
---     let UnsafeTx {..} = taTx txAux
---     let txInAddrs = map (txOutAddress . toaOut) $ toList _ptcUtxoBase
---         txOutAddrs = toList $ map txOutAddress _txOutputs
---         allAddrs = ordNub $ txInAddrs <> txOutAddrs
---     hmHistories <-
---         buildMap allAddrs <$> mapM (fmap Just . ExDB.getAddrHistory) allAddrs
---     hmBalances <- buildMap allAddrs <$> mapM ExDB.getAddrBalance allAddrs
---     utxoSum <- ExDB.getUtxoSum
---     -- `eet` is passed to `txProcessTransactionAbstract` where it is used in
---     -- a ReaderT environment to provide underlying functions (`modifyAddrHistory`
---     -- and `modifyAddrBalance`) with data to update. In case of `TxExtra` data
---     -- is only added, but never updated, hence `mempty` here.
---     let eet = ExplorerExtraTxp mempty hmHistories hmBalances utxoSum
---     pure $ ProcessTxContext _ptcAdoptedBVData _ptcUtxoBase eet
---   where
---     buildMap :: (Eq a, Hashable a) => [a] -> [Maybe b] -> HM.HashMap a b
---     buildMap keys maybeValues =
---         HM.fromList $
---         catMaybes $ toList $ zipWith (liftM2 (,) . Just) keys maybeValues
+    processTx' ::
+           Maybe Timestamp
+        -> BlockVersionData
+        -> EpochIndex
+        -> (TxId, TxAux)
+        -> ExceptT ToilVerFailure
+             (ExtendedLocalToilM ExplorerExtraLookup ExplorerExtraModifier) ()
+    processTx' mTxTimestamp bvd epoch tx =
+        eProcessTx bvd epoch tx (TxExtra Nothing mTxTimestamp)
 
 -- | 1. Recompute UtxoView by current MemPool
 --   2. Remove invalid transactions from MemPool
 --   3. Set new tip to txp local data
 eTxNormalize ::
-       ( TxpLocalWorkMode ctx m
-       , MempoolExt m ~ ExplorerExtraModifier
-       )
+       forall ctx m. (ETxpLocalWorkMode ctx m)
     => m ()
 eTxNormalize = do
     extras <- MM.insertionsMap . view eemLocalTxsExtra <$> getTxpExtra
-    txNormalizeAbstract buildContext (eNormalizeToil' extras)
+    txNormalizeAbstract buildExplorerExtraLookup (normalizeToil' extras)
   where
-    buildContext :: [TxAux] -> m ExplorerExtraLookup
-    buildContext _ = pure undefined
-
-    eNormalizeToil' ::
+    normalizeToil' ::
            HashMap TxId TxExtra
         -> BlockVersionData
         -> EpochIndex
         -> HashMap TxId TxAux
         -> ExtendedLocalToilM ExplorerExtraLookup ExplorerExtraModifier ()
-    eNormalizeToil' extras bvd epoch txs =
+    normalizeToil' extras bvd epoch txs =
         let toNormalize = HM.toList $ HM.intersectionWith (,) txs extras
         in eNormalizeToil bvd epoch toNormalize
-
-
-
--- extra <- getTxpExtra
--- let extras = MM.insertionsMap $ extra ^. eeLocalTxsExtra
--- txNormalizeAbstract $ \e localTxs -> do
---     let toNormalize
---     eNormalizeToil e toNormalize

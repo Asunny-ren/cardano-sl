@@ -1,7 +1,7 @@
 -- | Impure functions which are used by both local and global txp.
 
 module Pos.Txp.Logic.Common
-       ( buildUtxoLookup
+       ( buildUtxo
        ) where
 
 import           Universum
@@ -12,20 +12,18 @@ import qualified Data.Map as M (fromList)
 import           Pos.Core.Txp (Tx (..), TxAux (..))
 import           Pos.DB.Class (MonadDBRead)
 import qualified Pos.Txp.DB as DB
-import           Pos.Txp.Toil (Utxo, UtxoLookup, UtxoModifier, normalizeToil, processTx,
-                               utxoToLookup)
+import           Pos.Txp.Toil (Utxo, UtxoModifier)
 import qualified Pos.Util.Modifier as MM
 
--- | Build base 'UtxoLookup' for given transactions considering given
+-- | Build base 'Utxo' for given transactions considering given
 -- 'UtxoModifier' (can be 'mempty'). Necessary data is taken from the DB.
-buildUtxoLookup ::
-       forall m. (MonadIO m, MonadDBRead m)
+buildUtxo ::
+       forall m. (MonadDBRead m)
     => UtxoModifier
     -> [TxAux]
-    -> m UtxoLookup
-buildUtxoLookup utxoModifier txs = do
-    utxo <- concatMapM buildForOne txs
-    return (utxoToLookup utxo)
+    -> m Utxo
+buildUtxo utxoModifier txs =
+    concatMapM buildForOne txs
   where
     buildForOne :: TxAux -> m Utxo
     buildForOne txAux = do

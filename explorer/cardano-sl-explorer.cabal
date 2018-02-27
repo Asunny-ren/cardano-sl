@@ -43,6 +43,7 @@ library
 
                         Pos.Binary.Explorer
                         Pos.Explorer.Core.Types
+                        Pos.Explorer.Txp.Common
                         Pos.Explorer.Txp.Global
                         Pos.Explorer.Txp.Local
                         Pos.Explorer.Txp.Toil
