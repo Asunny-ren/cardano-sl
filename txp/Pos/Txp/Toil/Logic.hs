@@ -55,7 +55,7 @@ import           Pos.Util (eitherToMonadError)
 -- witnesses, addresses, attributes) must be known. Otherwise unknown
 -- data is just ignored.
 verifyToil ::
-       (HasConfiguration, HasTxpConfiguration)
+       (HasConfiguration)
     => BlockVersionData
     -> EpochIndex
     -> Bool
@@ -144,7 +144,7 @@ normalizeToil bvd curEpoch txs = mapM_ normalize ordered
 -- Note: it doesn't consider/affect stakes! That's because we don't
 -- care about stakes for local txp.
 verifyAndApplyTx ::
-       (HasTxpConfiguration, HasConfiguration)
+       (HasConfiguration)
     => BlockVersionData
     -> EpochIndex
     -> Bool

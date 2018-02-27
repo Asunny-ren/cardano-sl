@@ -16,6 +16,7 @@ module Pos.Txp.Logic.Global
 
 import           Universum
 
+import           Control.Monad.Except (throwError)
 import           Data.Default (Default)
 import qualified Data.HashMap.Strict as HM
 import qualified Data.List.NonEmpty as NE
@@ -31,17 +32,17 @@ import qualified Pos.DB.GState.Stakes as DB
 import           Pos.Exception (assertionFailed)
 import           Pos.Txp.Base (flattenTxPayload)
 import qualified Pos.Txp.DB as DB
+import           Pos.Txp.Logic.Common (buildUtxo)
 import           Pos.Txp.Settings.Global (TxpBlock, TxpBlund, TxpGlobalApplyMode,
                                           TxpGlobalRollbackMode, TxpGlobalSettings (..),
                                           TxpGlobalVerifyMode)
 import           Pos.Txp.Toil (GlobalToilEnv (..), GlobalToilM, GlobalToilState (..),
-                               StakesView (..), ToilVerFailure, UtxoM, applyToil,
-                               defGlobalToilState, rollbackToil, runGlobalToilM, verifyToil)
+                               StakesView (..), ToilVerFailure, UtxoM, UtxoModifier, applyToil,
+                               defGlobalToilState, gtsUtxoModifier, rollbackToil, runGlobalToilM,
+                               runUtxoM, utxoToLookup, verifyToil)
 import           Pos.Util.AssertMode (inAssertMode)
 import           Pos.Util.Chrono (NE, NewestFirst (..), OldestFirst (..))
 import qualified Pos.Util.Modifier as MM
-
-
 
 -- | Settings used for global transactions data processing used by a
 -- simple full node.
@@ -58,21 +59,32 @@ verifyBlocks ::
     => Bool
     -> OldestFirst NE TxpBlock
     -> m $ Either ToilVerFailure $ OldestFirst NE TxpUndo
-verifyBlocks verifyAllIsKnown newChain = undefined
-  --   runExceptT $ do
-  --       bvd <- gsAdoptedBVData
-  --       let verifyPure :: TxpBlock -> UtxoM (Either ToilVerFailure TxpUndo)
-  --           verifyPure =
-  --               runExceptT .
-  --               verifyToil bvd epoch verifyAllIsKnown . convertPayload
-  --           verifyDo :: TxpBlock -> m (Either ToilVerFailure TxpUndo)
-  --           verifyDo = evalUtxoM mempty DB.getTxOut . verifyPure
-  --       mapM (ExceptT . verifyDo) newChain
-  -- where
-  --   epoch = NE.last (getOldestFirst newChain) ^. epochIndexL
-  --   convertPayload :: TxpBlock -> [TxAux]
-  --   convertPayload (ComponentBlockMain _ payload) = flattenTxPayload payload
-  --   convertPayload (ComponentBlockGenesis _)      = []
+verifyBlocks verifyAllIsKnown newChain = runExceptT $ do
+    bvd <- gsAdoptedBVData
+    let verifyPure :: [TxAux] -> UtxoM (Either ToilVerFailure TxpUndo)
+        verifyPure = runExceptT . verifyToil bvd epoch verifyAllIsKnown
+        foldStep ::
+               (UtxoModifier, [TxpUndo])
+            -> TxpBlock
+            -> ExceptT ToilVerFailure m (UtxoModifier, [TxpUndo])
+        foldStep (modifier, undos) (convertPayload -> txAuxes) = do
+            baseUtxo <- utxoToLookup <$> buildUtxo modifier txAuxes
+            case runUtxoM modifier baseUtxo (verifyPure txAuxes) of
+                (Left err, _) -> throwError err
+                (Right txpUndo, newModifier) ->
+                    return (newModifier, txpUndo : undos)
+        -- 'NE.fromList' is safe here, because there will be at least
+        -- one 'foldStep' (since 'newChain' is not empty) and it will
+        -- either fail (and then 'convertRes' will not be called) or
+        -- will prepend something to the result.
+        convertRes :: (UtxoModifier, [TxpUndo]) -> OldestFirst NE TxpUndo
+        convertRes = OldestFirst . NE.fromList . reverse . snd
+    convertRes <$> foldM foldStep mempty newChain
+  where
+    epoch = NE.last (getOldestFirst newChain) ^. epochIndexL
+    convertPayload :: TxpBlock -> [TxAux]
+    convertPayload (ComponentBlockMain _ payload) = flattenTxPayload payload
+    convertPayload (ComponentBlockGenesis _)      = []
 
 data ApplyBlocksSettings extra m = ApplyBlocksSettings
     { absApplySingle     :: TxpBlund -> m ()
@@ -107,62 +119,40 @@ rollbackBlocks ::
        forall m. TxpGlobalRollbackMode m
     => NewestFirst NE TxpBlund
     -> m SomeBatchOp
-rollbackBlocks blunds = undefined
-  -- convert <$> do
-  --   totalStake <- DB.getRealTotalStake
-  --   let env = GlobalToilEnv totalStake
-  --       rollbackPure :: TxpBlund -> GlobalToilM ()
-  --       rollbackPure = rollbackToil . blundToAuxNUndo
-  --       rollbackDo :: GlobalToilState -> TxpBlund -> m GlobalToilState
-  --       rollbackDo gts =
-  --           fmap snd .
-  --           runGlobalToilM env gts DB.getTxOut DB.getRealStake .
-  --           rollbackPure
-  --   foldM rollbackDo defGlobalToilState blunds
-  -- where
-  --   convert :: GlobalToilState -> SomeBatchOp
-  --   convert = undefined
-
--- toilModifierToBatch . snd <$>
--- runToilAction (mapM (rollbackToil . blundToAuxNUndo) blunds)
+rollbackBlocks blunds =
+    globalToilStateToBatch <$> foldM rollbackStep defGlobalToilState blunds
+  where
+    rollbackStep :: GlobalToilState -> TxpBlund -> m GlobalToilState
+    rollbackStep gts txpBlund = do
+        let txAuxesAndUndos = blundToAuxNUndo txpBlund
+            txAuxes = fst <$> txAuxesAndUndos
+        totalStake <- DB.getRealTotalStake
+        baseUtxo <- utxoToLookup <$> buildUtxo (gts ^. gtsUtxoModifier) txAuxes
+        let env =
+                GlobalToilEnv
+                { _gteUtxo = baseUtxo
+                , _gteTotalStake = totalStake
+                }
+        snd <$> runGlobalToilM env gts DB.getRealStake (rollbackToil txAuxesAndUndos)
 
 ----------------------------------------------------------------------------
 -- Helpers
 ----------------------------------------------------------------------------
 
--- | Convert 'GenericToilModifier' to batch of database operations.
-genericGlobalToilStateToBatch :: HasConfiguration
-                           => (e -> SomeBatchOp)
-                           -> GlobalToilState
-                           -> SomeBatchOp
-genericGlobalToilStateToBatch = undefined
--- genericToilModifierToBatch convertExtra modifier =
---     SomeBatchOp (extraOp : [SomeBatchOp utxoOps, SomeBatchOp stakesOps])
---   where
---     ToilModifier
---         { _tmUtxo = um
---         , _tmStakes = (StakesView (HM.toList -> stakes) total)
---         , _tmExtra = extra
---         } = modifier
---     utxoOps =
---         map DB.DelTxIn (MM.deletions um) ++
---         map (uncurry DB.AddTxOut) (MM.insertions um)
---     stakesOpsAlmost = map (uncurry DB.PutFtsStake) stakes
---     stakesOps =
---         case total of
---             Nothing -> stakesOpsAlmost
---             Just x  -> DB.PutTotalStake x : stakesOpsAlmost
---     extraOp = convertExtra extra
-
--- | Convert simple 'GlobalToilState' to batch of database operations.
-toilModifierToBatch :: HasConfiguration => GlobalToilState -> SomeBatchOp
-toilModifierToBatch = genericGlobalToilStateToBatch (const mempty)
-
--- -- | Run action which requires toil interfaces.
--- runToilAction
---     :: (MonadDBRead m, Default e)
---     => ToilT e (DBToil m) a -> m (a, GenericToilModifier e)
--- runToilAction action = runDBToil . runToilTGlobal $ action
+-- | Convert 'GlobalToilState' to batch of database operations.
+globalToilStateToBatch :: HasConfiguration => GlobalToilState -> SomeBatchOp
+globalToilStateToBatch GlobalToilState {..} =
+    SomeBatchOp [SomeBatchOp utxoOps, SomeBatchOp stakesOps]
+  where
+    StakesView (HM.toList -> stakes) total = _gtsStakesView
+    utxoOps =
+        map DB.DelTxIn (MM.deletions _gtsUtxoModifier) ++
+        map (uncurry DB.AddTxOut) (MM.insertions _gtsUtxoModifier)
+    stakesOps = addTotalStakeOp $ map (uncurry DB.PutFtsStake) stakes
+    addTotalStakeOp =
+        case total of
+            Nothing -> identity
+            Just x  -> (DB.PutTotalStake x :)
 
 -- Zip block's TxAuxes and corresponding TxUndos.
 blundToAuxNUndo :: TxpBlund -> [(TxAux, TxUndo)]

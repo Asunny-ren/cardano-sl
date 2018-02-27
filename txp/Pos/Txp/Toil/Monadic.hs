@@ -25,6 +25,8 @@ module Pos.Txp.Toil.Monadic
 
          -- * Monadic global Toil
        , GlobalToilState (..)
+       , gtsUtxoModifier
+       , gtsStakesView
        , defGlobalToilState
        , GlobalToilEnv (..)
        , GlobalToilM
@@ -212,65 +214,3 @@ utxoMToGlobalToilM = mapReaderT f . magnify gteUtxo
          State UtxoModifier a
       -> StateT GlobalToilState (NamedPureLogger (Free StakesLookupF)) a
     f = state . runState . zoom gtsUtxoModifier
-
-
-
-
-
-
-----------------------------------------------------------------------------
--- Obsolete
-----------------------------------------------------------------------------
-
--- runToilTGlobal
---     :: (Default ext, Functor m)
---     => ToilT ext m a -> m (a, GenericToilModifier ext)
--- runToilTGlobal txpt = Ether.runStateT' txpt def
-
--- -- | Run ToilT using empty stakes modifier. Should be used for local
--- -- transaction processing.
--- runToilTLocal
---     :: (Functor m)
---     => UtxoModifier
---     -> MemPool
---     -> UndoMap
---     -> ToilT () m a
---     -> m (a, ToilModifier)
--- runToilTLocal um mp undo txpt =
---     Ether.runStateT' txpt (def {_tmUtxo = um, _tmMemPool = mp, _tmUndos = undo})
-
--- evalToilTEmpty
---     :: Monad m
---     => ToilT () m a
---     -> m a
--- evalToilTEmpty txpt = Ether.evalStateT txpt def
-
--- -- | Execute ToilT using empty stakes modifier. Should be used for
--- -- local transaction processing.
--- execToilTLocal
---     :: (Functor m)
---     => UtxoModifier
---     -> MemPool
---     -> UndoMap
---     -> ToilT () m a
---     -> m ToilModifier
--- execToilTLocal um mp undo = fmap snd . runToilTLocal um mp undo
-
--- -- | Like 'runToilTLocal', but takes extra data as argument.
--- runToilTLocalExtra
---     :: (Functor m)
---     => UtxoModifier
---     -> MemPool
---     -> UndoMap
---     -> extra
---     -> ToilT extra m a
---     -> m (a, GenericToilModifier extra)
--- runToilTLocalExtra um mp undo e =
---     flip Ether.runStateT' $
---         ToilModifier
---         { _tmUtxo = um
---         , _tmStakes = def
---         , _tmMemPool = mp
---         , _tmUndos = undo
---         , _tmExtra = e
---         }
