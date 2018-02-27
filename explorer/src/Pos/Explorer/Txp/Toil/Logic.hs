@@ -24,11 +24,11 @@ import           Pos.Core (Address, BlockVersionData, Coin, EpochIndex, HasConfi
 import           Pos.Core.Txp (Tx (..), TxAux (..), TxId, TxOut (..), TxOutAux (..), TxUndo, _TxOut)
 import           Pos.Crypto (WithHash (..), hash)
 import           Pos.Explorer.Core (AddrHistory, TxExtra (..))
-import           Pos.Explorer.Txp.Toil.Monadic (ELocalToilM, TxExtraM, delAddrBalance, delTxExtra,
+import           Pos.Explorer.Txp.Toil.Monadic (ELocalToilM, ExplorerExtraM, delAddrBalance,
+                                                delTxExtra, explorerExtraMToELocalToilM,
                                                 getAddrBalance, getAddrHistory, getUtxoSum,
                                                 localToilMToELocalToilM, putAddrBalance, putTxExtra,
-                                                putUtxoSum, txExtraMToELocalToilM,
-                                                updateAddrHistory)
+                                                putUtxoSum, updateAddrHistory)
 import           Pos.Txp.Configuration (HasTxpConfiguration, memPoolLimitTx)
 import           Pos.Txp.Toil (ToilVerFailure (..))
 import qualified Pos.Txp.Toil as Txp
@@ -94,7 +94,7 @@ eProcessTx ::
     -> ExceptT ToilVerFailure ELocalToilM ()
 eProcessTx bvd curEpoch tx@(id, aux) createExtra = do
     undo <- mapExceptT localToilMToELocalToilM $ Txp.processTx bvd curEpoch tx
-    lift $ txExtraMToELocalToilM $ do
+    lift $ explorerExtraMToELocalToilM $ do
         let extra = createExtra undo
         putTxExtraWithHistory id extra $ getTxRelatedAddrs aux undo
         let balanceUpdate = getBalanceUpdate aux undo
@@ -125,22 +125,22 @@ data BalanceUpdate = BalanceUpdate
     , plusBalance  :: [(Address, Coin)]
     }
 
-modifyAddrHistory :: (AddrHistory -> AddrHistory) -> Address -> TxExtraM ()
+modifyAddrHistory :: (AddrHistory -> AddrHistory) -> Address -> ExplorerExtraM ()
 modifyAddrHistory f addr = updateAddrHistory addr . f =<< getAddrHistory addr
 
-putTxExtraWithHistory :: TxId -> TxExtra -> NonEmpty Address -> TxExtraM ()
+putTxExtraWithHistory :: TxId -> TxExtra -> NonEmpty Address -> ExplorerExtraM ()
 putTxExtraWithHistory id extra addrs = do
     putTxExtra id extra
     for_ addrs $ modifyAddrHistory $
         NewestFirst . (id :) . getNewestFirst
 
-delTxExtraWithHistory :: TxId -> NonEmpty Address -> TxExtraM ()
+delTxExtraWithHistory :: TxId -> NonEmpty Address -> ExplorerExtraM ()
 delTxExtraWithHistory id addrs = do
     delTxExtra id
     for_ addrs $ modifyAddrHistory $
         NewestFirst . delete id . getNewestFirst
 
-updateUtxoSumFromBalanceUpdate :: BalanceUpdate -> TxExtraM ()
+updateUtxoSumFromBalanceUpdate :: BalanceUpdate -> ExplorerExtraM ()
 updateUtxoSumFromBalanceUpdate balanceUpdate = do
     let plusChange  = sumCoins $ map snd $ plusBalance  balanceUpdate
         minusChange = sumCoins $ map snd $ minusBalance balanceUpdate
@@ -185,10 +185,10 @@ combineBalanceUpdates BalanceUpdate {..} =
     reducer (Nothing, Just minus) | minus /= mkCoin 0 = Just (Minus, minus)
     reducer _ = Nothing
 
-updateAddrBalances :: BalanceUpdate -> TxExtraM ()
+updateAddrBalances :: BalanceUpdate -> ExplorerExtraM ()
 updateAddrBalances (combineBalanceUpdates -> updates) = mapM_ updater updates
   where
-    updater :: (Address, (Sign, Coin)) -> TxExtraM ()
+    updater :: (Address, (Sign, Coin)) -> ExplorerExtraM ()
     updater (addr, (Plus, coin)) = do
         currentBalance <- fromMaybe (mkCoin 0) <$> getAddrBalance addr
         let newBalance = unsafeAddCoin currentBalance coin
@@ -198,12 +198,14 @@ updateAddrBalances (combineBalanceUpdates -> updates) = mapM_ updater updates
         case maybeBalance of
             Nothing ->
                 logError $
-                    sformat ("updateAddrBalances: attempted to subtract "%build%" from unknown address "%build)
+                    sformat ("updateAddrBalances: attempted to subtract "%build%
+                             " from unknown address "%build)
                     coin addr
             Just currentBalance
                 | currentBalance < coin ->
                     logError $
-                        sformat ("updateAddrBalances: attempted to subtract "%build%" from address "%build%" which only has "%build)
+                        sformat ("updateAddrBalances: attempted to subtract "%build%
+                                 " from address "%build%" which only has "%build)
                         coin addr currentBalance
                 | otherwise -> do
                     let newBalance = unsafeSubCoin currentBalance coin

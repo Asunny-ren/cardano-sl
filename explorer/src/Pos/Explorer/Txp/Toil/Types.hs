@@ -6,7 +6,7 @@ module Pos.Explorer.Txp.Toil.Types
        , eemAddrHistories
        , eemAddrBalances
        , eemNewUtxoSum
-       , ExplorerExtraTxp (..)
+       , ExplorerExtraLookup (..)
        ) where
 
 import           Universum
@@ -40,11 +40,16 @@ instance Default ExplorerExtraModifier where
         , _eemNewUtxoSum    = Nothing
         }
 
--- type EToilModifier = GenericToilModifier ExplorerExtra
+-- data ExplorerExtraTxp = ExplorerExtraTxp
+--     { eetTxExtra       :: !(HashMap TxId TxExtra)
+--     , eetAddrHistories :: !(HashMap Address AddrHistory)
+--     , eetAddrBalances  :: !(HashMap Address Coin)
+--     , eetUtxoSum       :: !Integer
+--     }
 
-data ExplorerExtraTxp = ExplorerExtraTxp
-    { eetTxExtra       :: !(HashMap TxId TxExtra)
-    , eetAddrHistories :: !(HashMap Address AddrHistory)
-    , eetAddrBalances  :: !(HashMap Address Coin)
-    , eetUtxoSum       :: !Integer
+data ExplorerExtraLookup = ExplorerExtraLookup
+    { eelGetTxExtra     :: TxId -> Maybe TxExtra
+    , eelGetAddrHistory :: Address -> AddrHistory
+    , eelGetAddrBalance :: Address -> Maybe Coin
+    , eelGetUtxoSum     :: !Integer
     }

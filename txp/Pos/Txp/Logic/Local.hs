@@ -12,9 +12,8 @@ module Pos.Txp.Logic.Local
        , txGetPayload
 
        -- Utils to processing and nomralization tx
-       , TxProcessingMode
-       , txProcessTransactionAbstract
        , ExtendedLocalToilM
+       , txProcessTransactionAbstract
        , txNormalizeAbstract
        ) where
 
@@ -22,12 +21,14 @@ import           Universum
 
 import           Control.Lens (magnify, zoom)
 import           Control.Monad.Except (mapExceptT, runExceptT, throwError)
+import           Control.Monad.Morph (generalize)
 import           Control.Monad.Reader (mapReaderT)
 import           Control.Monad.State.Strict (mapStateT)
 import           Data.Default (Default (def))
 import qualified Data.HashMap.Strict as HM
 import           Formatting (build, sformat, (%))
-import           System.Wlog (NamedPureLogger, WithLogger, logDebug, logError, logWarning)
+import           System.Wlog (NamedPureLogger, WithLogger, launchNamedPureLog, logDebug, logError,
+                              logWarning)
 
 import           Pos.Core (BlockVersionData, EpochIndex, HeaderHash, siEpoch)
 import           Pos.Core.Txp (TxAux (..), TxId, TxUndo)
@@ -41,19 +42,30 @@ import           Pos.Txp.Logic.Common (buildUtxoLookup)
 import           Pos.Txp.MemState (GenericTxpLocalData (..), GenericTxpLocalDataPure, MempoolExt,
                                    MonadTxpMem, TxpLocalWorkMode, askTxpMem, getLocalTxsMap,
                                    getUtxoModifier, modifyTxpLocalData, setTxpLocalData)
-import           Pos.Txp.Toil (LocalToilState (..), ToilVerFailure (..), UtxoLookup, mpLocalTxs,
-                               normalizeToil, processTx)
+import           Pos.Txp.Toil (LocalToilM, LocalToilState (..), ToilVerFailure (..), UtxoLookup,
+                               mpLocalTxs, normalizeToil, processTx)
 import           Pos.Txp.Topsort (topsortTxs)
 import           Pos.Util.Util (HasLens')
 
 type TxpProcessTransactionMode ctx m =
     ( TxpLocalWorkMode ctx m
-    , MonadReader ctx m
     , HasLens' ctx StateLock
     , HasLens' ctx StateLockMetrics
-    , MonadMask m
     , MempoolExt m ~ ()
     )
+
+-- | Extended version of 'LocalToilM'. It allows to put extra data
+-- into reader context, extra state and also adds logging
+-- capabilities. It's needed for explorer which has more complicated
+-- transaction processing.
+type ExtendedLocalToilM extraEnv extraState =
+    ReaderT (UtxoLookup, extraEnv) (
+        StateT (LocalToilState, extraState) (
+            NamedPureLogger Identity
+    ))
+
+natLocalToilM :: LocalToilM a -> ExtendedLocalToilM __ ___ a
+natLocalToilM = mapReaderT (mapStateT lift . zoom _1) . magnify _1
 
 -- | Process transaction. 'TxId' is expected to be the hash of
 -- transaction in 'TxAux'. Separation is supported for optimization
@@ -80,23 +92,14 @@ txProcessTransactionNoLock =
            BlockVersionData
         -> EpochIndex
         -> (TxId, TxAux)
-        -> TxProcessingMode () () TxUndo
-    processTxHoisted =
-        mapExceptT (mapReaderT (mapStateT lift . zoom _1) . magnify _1) ...
-        processTx
-
-type TxProcessingMode extraEnv extraState =
-    ExceptT ToilVerFailure (
-        ReaderT (UtxoLookup, extraEnv) (
-            StateT (LocalToilState, extraState) (
-                NamedPureLogger Identity
-    )))
+        -> ExceptT ToilVerFailure (ExtendedLocalToilM () ()) TxUndo
+    processTxHoisted = mapExceptT natLocalToilM ... processTx
 
 txProcessTransactionAbstract ::
        forall extraEnv extraState ctx m a.
        (TxpLocalWorkMode ctx m, MempoolExt m ~ extraState)
     => (TxAux -> m extraEnv)
-    -> (BlockVersionData -> EpochIndex -> (TxId, TxAux) -> TxProcessingMode extraEnv extraState a)
+    -> (BlockVersionData -> EpochIndex -> (TxId, TxAux) -> ExceptT ToilVerFailure (ExtendedLocalToilM extraEnv extraState) a)
     -> (TxId, TxAux)
     -> m (Either ToilVerFailure ())
 txProcessTransactionAbstract buildEnv txAction itw@(txId, txAux) = reportTipMismatch $ runExceptT $ do
@@ -184,10 +187,7 @@ txNormalize =
         -> HashMap TxId TxAux
         -> ExtendedLocalToilM () () ()
     normalizeToilHoisted bvd epoch txs =
-        zoom _1 . magnify _1 $ normalizeToil bvd epoch $ HM.toList txs
-
-type ExtendedLocalToilM extraEnv extraState
-     = ReaderT (UtxoLookup, extraEnv) (State (LocalToilState, extraState))
+        natLocalToilM $ normalizeToil bvd epoch $ HM.toList txs
 
 txNormalizeAbstract ::
        (TxpLocalWorkMode ctx m, MempoolExt m ~ extraState, Default extraState)
@@ -213,12 +213,13 @@ txNormalizeAbstract buildEnv normalizeAction =
                         , _ltsUtxoModifier = mempty
                         , _ltsUndos = mempty
                         }
-            let (LocalToilState {..}, newExtraState) =
-                    execState
-                        (runReaderT
-                             (normalizeAction bvd epoch localTxs)
-                             (utxo, extraEnv))
-                        (initialState, def)
+            (LocalToilState {..}, newExtraState) <-
+                launchNamedPureLog generalize $
+                execStateT
+                    (runReaderT
+                         (normalizeAction bvd epoch localTxs)
+                         (utxo, extraEnv))
+                    (initialState, def)
             setTxpLocalData
                 ( _ltsUtxoModifier
                 , _ltsMemPool

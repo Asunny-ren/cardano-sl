@@ -4,8 +4,7 @@
 
 module Pos.Explorer.Txp.Toil.Monadic
        (
-         TxExtraLookup (..)
-       , TxExtraM
+         ExplorerExtraM
 
        , getTxExtra
        , getAddrHistory
@@ -20,7 +19,7 @@ module Pos.Explorer.Txp.Toil.Monadic
        , putUtxoSum
 
        , ELocalToilM
-       , txExtraMToELocalToilM
+       , explorerExtraMToELocalToilM
        , localToilMToELocalToilM
        ) where
 
@@ -33,8 +32,9 @@ import           System.Wlog (NamedPureLogger)
 
 import           Pos.Core (Address, Coin, TxId)
 import           Pos.Explorer.Core (AddrHistory, TxExtra)
-import           Pos.Explorer.Txp.Toil.Types (ExplorerExtraModifier, eemAddrBalances,
-                                              eemAddrHistories, eemLocalTxsExtra, eemNewUtxoSum)
+import           Pos.Explorer.Txp.Toil.Types (ExplorerExtraLookup (..), ExplorerExtraModifier,
+                                              eemAddrBalances, eemAddrHistories, eemLocalTxsExtra,
+                                              eemNewUtxoSum)
 import           Pos.Txp.Toil (LocalToilM, LocalToilState, UtxoLookup)
 import qualified Pos.Util.Modifier as MM
 
@@ -42,52 +42,45 @@ import qualified Pos.Util.Modifier as MM
 -- Monadic actions with extra txp data.
 ----------------------------------------------------------------------------
 
-data TxExtraLookup = TxExtraLookup
-    { telGetTxExtra     :: TxId -> Maybe TxExtra
-    , telGetAddrHistory :: Address -> AddrHistory
-    , telGetAddrBalance :: Address -> Maybe Coin
-    , telGetUtxoSum     :: Integer
-    }
-
 -- | Utility monad which allows to lookup extra values related to txp and modify them.
-type TxExtraM
-     = ReaderT TxExtraLookup (StateT ExplorerExtraModifier (NamedPureLogger Identity))
+type ExplorerExtraM
+     = ReaderT ExplorerExtraLookup (StateT ExplorerExtraModifier (NamedPureLogger Identity))
 
-getTxExtra :: TxId -> TxExtraM (Maybe TxExtra)
+getTxExtra :: TxId -> ExplorerExtraM (Maybe TxExtra)
 getTxExtra txId = do
-    baseLookup <- telGetTxExtra <$> ask
+    baseLookup <- eelGetTxExtra <$> ask
     MM.lookup baseLookup txId <$> use eemLocalTxsExtra
 
-getAddrHistory :: Address -> TxExtraM AddrHistory
+getAddrHistory :: Address -> ExplorerExtraM AddrHistory
 getAddrHistory addr = do
     use (eemAddrHistories . at addr) >>= \case
-        Nothing -> telGetAddrHistory <$> ask <*> pure addr
+        Nothing -> eelGetAddrHistory <$> ask <*> pure addr
         Just hist -> pure hist
 
-getAddrBalance :: Address -> TxExtraM (Maybe Coin)
+getAddrBalance :: Address -> ExplorerExtraM (Maybe Coin)
 getAddrBalance addr = do
-    baseLookup <- telGetAddrBalance <$> ask
+    baseLookup <- eelGetAddrBalance <$> ask
     MM.lookup baseLookup addr <$> use eemAddrBalances
 
-getUtxoSum :: TxExtraM Integer
-getUtxoSum = fromMaybe <$> (telGetUtxoSum <$> ask) <*> use eemNewUtxoSum
+getUtxoSum :: ExplorerExtraM Integer
+getUtxoSum = fromMaybe <$> (eelGetUtxoSum <$> ask) <*> use eemNewUtxoSum
 
-putTxExtra :: TxId -> TxExtra -> TxExtraM ()
+putTxExtra :: TxId -> TxExtra -> ExplorerExtraM ()
 putTxExtra txId extra = eemLocalTxsExtra %= MM.insert txId extra
 
-delTxExtra :: TxId -> TxExtraM ()
+delTxExtra :: TxId -> ExplorerExtraM ()
 delTxExtra txId = eemLocalTxsExtra %= MM.delete txId
 
-updateAddrHistory :: Address -> AddrHistory -> TxExtraM ()
+updateAddrHistory :: Address -> AddrHistory -> ExplorerExtraM ()
 updateAddrHistory addr hist = eemAddrHistories . at addr .= Just hist
 
-putAddrBalance :: Address -> Coin -> TxExtraM ()
+putAddrBalance :: Address -> Coin -> ExplorerExtraM ()
 putAddrBalance addr coin = eemAddrBalances %= MM.insert addr coin
 
-delAddrBalance :: Address -> TxExtraM ()
+delAddrBalance :: Address -> ExplorerExtraM ()
 delAddrBalance addr = eemAddrBalances %= MM.delete addr
 
-putUtxoSum :: Integer -> TxExtraM ()
+putUtxoSum :: Integer -> ExplorerExtraM ()
 putUtxoSum utxoSum = eemNewUtxoSum .= Just utxoSum
 
 ----------------------------------------------------------------------------
@@ -95,13 +88,13 @@ putUtxoSum utxoSum = eemNewUtxoSum .= Just utxoSum
 ----------------------------------------------------------------------------
 
 type ELocalToilM
-     = ReaderT (UtxoLookup, TxExtraLookup) (
+     = ReaderT (UtxoLookup, ExplorerExtraLookup) (
        StateT  (LocalToilState, ExplorerExtraModifier) (
        NamedPureLogger
        Identity))
 
-txExtraMToELocalToilM :: TxExtraM a -> ELocalToilM a
-txExtraMToELocalToilM = mapReaderT (zoom _2) . magnify _2
+explorerExtraMToELocalToilM :: ExplorerExtraM a -> ELocalToilM a
+explorerExtraMToELocalToilM = mapReaderT (zoom _2) . magnify _2
 
 localToilMToELocalToilM :: LocalToilM a -> ELocalToilM a
 localToilMToELocalToilM = mapReaderT (mapStateT lift . zoom _1) . magnify _1

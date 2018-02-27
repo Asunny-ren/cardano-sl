@@ -14,6 +14,7 @@ import           Universum
 import qualified Data.HashMap.Strict as HM
 import           System.Wlog (NamedPureLogger)
 
+import           Pos.Core (BlockVersionData, EpochIndex)
 import           Pos.Core.Txp (Tx (..), TxAux (..), TxId, toaOut, txOutAddress)
 import           Pos.DB.Class (MonadDBRead, MonadGState (..))
 import qualified Pos.Explorer.DB as ExDB
@@ -28,9 +29,8 @@ import qualified Pos.Util.Modifier as MM
 import           Pos.Util.Util (HasLens')
 
 import           Pos.Explorer.Core (TxExtra (..))
-import           Pos.Explorer.Txp.Toil (ExplorerExtraModifier, ExplorerExtraTxp (..),
-                                        MonadTxExtraRead (..), eNormalizeToil, eProcessTx,
-                                        eemLocalTxsExtra)
+import           Pos.Explorer.Txp.Toil (ExplorerExtraLookup (..), ExplorerExtraModifier,
+                                        eNormalizeToil, eProcessTx, eemLocalTxsExtra)
 
 
 -- type ETxpLocalWorkMode ctx m =
@@ -117,7 +117,7 @@ eTxNormalize = do
     extras <- MM.insertionsMap . view eemLocalTxsExtra <$> getTxpExtra
     txNormalizeAbstract buildContext (eNormalizeToil' extras)
   where
-    buildContext :: [TxAux] -> m ExplorerExtraTxp
+    buildContext :: [TxAux] -> m ExplorerExtraLookup
     buildContext _ = pure undefined
 
     eNormalizeToil' ::
@@ -125,7 +125,7 @@ eTxNormalize = do
         -> BlockVersionData
         -> EpochIndex
         -> HashMap TxId TxAux
-        -> ExtendedLocalToilM ExplorerExtraTxp ExplorerExtraModifier ()
+        -> ExtendedLocalToilM ExplorerExtraLookup ExplorerExtraModifier ()
     eNormalizeToil' extras bvd epoch txs =
         let toNormalize = HM.toList $ HM.intersectionWith (,) txs extras
         in eNormalizeToil bvd epoch toNormalize
