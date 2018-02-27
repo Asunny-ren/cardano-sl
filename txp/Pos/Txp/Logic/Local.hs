@@ -12,9 +12,9 @@ module Pos.Txp.Logic.Local
        , txGetPayload
 
        -- Utils to processing and nomralization tx
-       , buildUtxoLookup
        , TxProcessingMode
        , txProcessTransactionAbstract
+       , ExtendedLocalToilM
        , txNormalizeAbstract
        ) where
 

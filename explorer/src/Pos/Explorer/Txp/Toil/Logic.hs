@@ -3,9 +3,7 @@
 -- | Explorer's version of Toil logic.
 
 module Pos.Explorer.Txp.Toil.Logic
-       ( EGlobalApplyToilMode
-       , EGlobalVerifyToilMode
-       , eApplyToil
+       ( eApplyToil
        , eRollbackToil
        , eNormalizeToil
        , eProcessTx
@@ -13,23 +11,25 @@ module Pos.Explorer.Txp.Toil.Logic
 
 import           Universum
 
-import           Control.Monad.Except (MonadError (..))
+import           Control.Monad.Except (mapExceptT)
 import qualified Data.HashMap.Strict as HM
 import qualified Data.HashSet as HS
 import           Data.List (delete)
 import qualified Data.List.NonEmpty as NE
 import           Formatting (build, sformat, (%))
-import           System.Wlog (WithLogger, logError)
+import           System.Wlog (logError)
 
-import           Pos.Core (Address, BlockVersionData, Coin, EpochIndex, HeaderHash, Timestamp,
-                           mkCoin, sumCoins, unsafeAddCoin, unsafeSubCoin)
+import           Pos.Core (Address, BlockVersionData, Coin, EpochIndex, HasConfiguration,
+                           HeaderHash, Timestamp, mkCoin, sumCoins, unsafeAddCoin, unsafeSubCoin)
 import           Pos.Core.Txp (Tx (..), TxAux (..), TxId, TxOut (..), TxOutAux (..), TxUndo, _TxOut)
 import           Pos.Crypto (WithHash (..), hash)
 import           Pos.Explorer.Core (AddrHistory, TxExtra (..))
 import           Pos.Explorer.Txp.Toil.Monadic (ELocalToilM, TxExtraM, delAddrBalance, delTxExtra,
                                                 getAddrBalance, getAddrHistory, getUtxoSum,
-                                                putAddrBalance, putTxExtra, putUtxoSum,
-                                                txExtraMToELocalToilM, updateAddrHistory)
+                                                localToilMToELocalToilM, putAddrBalance, putTxExtra,
+                                                putUtxoSum, txExtraMToELocalToilM,
+                                                updateAddrHistory)
+import           Pos.Txp.Configuration (HasTxpConfiguration, memPoolLimitTx)
 import           Pos.Txp.Toil (ToilVerFailure (..))
 import qualified Pos.Txp.Toil as Txp
 import           Pos.Txp.Topsort (topsortTxs)
@@ -86,14 +86,15 @@ eRollbackToil txun = undefined -- do
 -- | Verify one transaction and also add it to mem pool and apply to utxo
 -- if transaction is valid.
 eProcessTx ::
-       BlockVersionData
+       (HasTxpConfiguration, HasConfiguration)
+    => BlockVersionData
     -> EpochIndex
     -> (TxId, TxAux)
     -> (TxUndo -> TxExtra)
-    -> ELocalToilM ()
+    -> ExceptT ToilVerFailure ELocalToilM ()
 eProcessTx bvd curEpoch tx@(id, aux) createExtra = do
-    undo <- undefined $ Txp.processTx bvd curEpoch tx
-    txExtraMToELocalToilM $ do
+    undo <- mapExceptT localToilMToELocalToilM $ Txp.processTx bvd curEpoch tx
+    lift $ txExtraMToELocalToilM $ do
         let extra = createExtra undo
         putTxExtraWithHistory id extra $ getTxRelatedAddrs aux undo
         let balanceUpdate = getBalanceUpdate aux undo
@@ -102,16 +103,17 @@ eProcessTx bvd curEpoch tx@(id, aux) createExtra = do
 
 -- | Get rid of invalid transactions.
 -- All valid transactions will be added to mem pool and applied to utxo.
-eNormalizeToil
-    :: Monad m
-    => EpochIndex
+eNormalizeToil ::
+       (HasTxpConfiguration, HasConfiguration)
+    => BlockVersionData
+    -> EpochIndex
     -> [(TxId, (TxAux, TxExtra))]
-    -> m ()
-eNormalizeToil curEpoch txs = undefined -- mapM_ normalize ordered
+    -> ELocalToilM ()
+eNormalizeToil bvd curEpoch txs = mapM_ normalize ordered
   where
     ordered = fromMaybe txs $ topsortTxs wHash txs
     wHash (i, (txAux, _)) = WithHash (taTx txAux) i
-    normalize = runExceptT . uncurry (eProcessTx curEpoch) . repair
+    normalize = runExceptT . uncurry (eProcessTx bvd curEpoch) . repair
     repair (i, (txAux, extra)) = ((i, txAux), const extra)
 
 ----------------------------------------------------------------------------

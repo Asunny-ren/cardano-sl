@@ -21,19 +21,21 @@ module Pos.Explorer.Txp.Toil.Monadic
 
        , ELocalToilM
        , txExtraMToELocalToilM
+       , localToilMToELocalToilM
        ) where
 
 import           Universum
 
 import           Control.Lens (at, magnify, zoom, (%=), (.=))
 import           Control.Monad.Reader (mapReaderT)
+import           Control.Monad.State.Strict (mapStateT)
 import           System.Wlog (NamedPureLogger)
 
 import           Pos.Core (Address, Coin, TxId)
 import           Pos.Explorer.Core (AddrHistory, TxExtra)
 import           Pos.Explorer.Txp.Toil.Types (ExplorerExtraModifier, eemAddrBalances,
                                               eemAddrHistories, eemLocalTxsExtra, eemNewUtxoSum)
-import           Pos.Txp.Toil (LocalToilState, UtxoLookup)
+import           Pos.Txp.Toil (LocalToilM, LocalToilState, UtxoLookup)
 import qualified Pos.Util.Modifier as MM
 
 ----------------------------------------------------------------------------
@@ -100,3 +102,6 @@ type ELocalToilM
 
 txExtraMToELocalToilM :: TxExtraM a -> ELocalToilM a
 txExtraMToELocalToilM = mapReaderT (zoom _2) . magnify _2
+
+localToilMToELocalToilM :: LocalToilM a -> ELocalToilM a
+localToilMToELocalToilM = mapReaderT (mapStateT lift . zoom _1) . magnify _1
