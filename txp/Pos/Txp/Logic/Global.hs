@@ -9,7 +9,7 @@ module Pos.Txp.Logic.Global
        -- * Helpers
        , ApplyBlocksSettings (..)
        -- , applyBlocksWith
-       -- , blundToAuxNUndo
+       , blundToAuxNUndo
        -- , genericGlobalToilStateToBatch
        -- , runToilAction
        ) where
