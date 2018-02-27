@@ -24,6 +24,7 @@ module Pos.Txp.Toil.Monadic
        , putTxWithUndo
 
          -- * Monadic global Toil
+       , StakesLookupF
        , GlobalToilState (..)
        , gtsUtxoModifier
        , gtsStakesView

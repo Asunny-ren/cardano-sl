@@ -19,7 +19,8 @@ import           Pos.Util.Chrono (NE, NewestFirst (..))
 import qualified Pos.Util.Modifier as MM
 
 import qualified Pos.Explorer.DB as GS
-import           Pos.Explorer.Txp.Toil (ExplorerExtraLookup (..), eApplyToil, eRollbackToil)
+import           Pos.Explorer.Txp.Toil (ExplorerExtraLookup (..), ExplorerExtraModifier (..),
+                                        eApplyToil, eRollbackToil)
 
 
 -- | Settings used for global transactions data processing used by explorer.
@@ -40,15 +41,15 @@ explorerTxpGlobalSettings =
 --     , absExtraOperations = extraOps
 --     }
 
--- extraOps :: HasConfiguration => ExplorerExtra -> SomeBatchOp
--- extraOps (ExplorerExtra em (HM.toList -> histories) balances utxoNewSum) =
---     SomeBatchOp $
---     map GS.DelTxExtra (MM.deletions em) ++
---     map (uncurry GS.AddTxExtra) (MM.insertions em) ++
---     map (uncurry GS.UpdateAddrHistory) histories ++
---     map (uncurry GS.PutAddrBalance) (MM.insertions balances) ++
---     map GS.DelAddrBalance (MM.deletions balances) ++
---     map GS.PutUtxoSum (maybeToList utxoNewSum)
+extraOps :: HasConfiguration => ExplorerExtraModifier -> SomeBatchOp
+extraOps (ExplorerExtraModifier em (HM.toList -> histories) balances utxoNewSum) =
+    SomeBatchOp $
+    map GS.DelTxExtra (MM.deletions em) ++
+    map (uncurry GS.AddTxExtra) (MM.insertions em) ++
+    map (uncurry GS.UpdateAddrHistory) histories ++
+    map (uncurry GS.PutAddrBalance) (MM.insertions balances) ++
+    map GS.DelAddrBalance (MM.deletions balances) ++
+    map GS.PutUtxoSum (maybeToList utxoNewSum)
 
 -- applyBlund
 --     :: (HasConfiguration, MonadSlots ctx m, EGlobalApplyToilMode m)
