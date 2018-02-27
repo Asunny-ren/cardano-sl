@@ -11,22 +11,22 @@ module Pos.Txp.Logic.Global
        -- , applyBlocksWith
        , blundToAuxNUndo
        -- , genericGlobalToilStateToBatch
-       -- , runToilAction
        ) where
 
 import           Universum
 
 import           Control.Monad.Except (throwError)
-import           Data.Default (Default)
+import           Data.Default (Default, def)
 import qualified Data.HashMap.Strict as HM
 import qualified Data.List.NonEmpty as NE
 import           Formatting (build, sformat, (%))
 
 import           Pos.Core.Block.Union (ComponentBlock (..))
 import           Pos.Core.Class (epochIndexL)
+import           Pos.Core.Common (Coin)
 import           Pos.Core.Configuration (HasConfiguration)
 import           Pos.Core.Txp (TxAux, TxUndo, TxpUndo)
-import           Pos.DB (MonadDBRead, SomeBatchOp (..))
+import           Pos.DB (SomeBatchOp (..))
 import           Pos.DB.Class (gsAdoptedBVData)
 import qualified Pos.DB.GState.Stakes as DB
 import           Pos.Exception (assertionFailed)
@@ -36,10 +36,10 @@ import           Pos.Txp.Logic.Common (buildUtxo)
 import           Pos.Txp.Settings.Global (TxpBlock, TxpBlund, TxpGlobalApplyMode,
                                           TxpGlobalRollbackMode, TxpGlobalSettings (..),
                                           TxpGlobalVerifyMode)
-import           Pos.Txp.Toil (GlobalToilEnv (..), GlobalToilM, GlobalToilState (..),
-                               StakesView (..), ToilVerFailure, UtxoM, UtxoModifier, applyToil,
-                               defGlobalToilState, gtsUtxoModifier, rollbackToil, runGlobalToilM,
-                               runUtxoM, utxoToLookup, verifyToil)
+import           Pos.Txp.Toil (GlobalToilEnv (..), GlobalToilState (..), StakesView (..),
+                               ToilVerFailure, UtxoM, UtxoModifier, applyToil, defGlobalToilState,
+                               execGlobalToilM, gtsUtxoModifier, rollbackToil, runUtxoM,
+                               utxoToLookup, verifyToil)
 import           Pos.Util.AssertMode (inAssertMode)
 import           Pos.Util.Chrono (NE, NewestFirst (..), OldestFirst (..))
 import qualified Pos.Util.Modifier as MM
@@ -50,7 +50,7 @@ txpGlobalSettings :: TxpGlobalSettings
 txpGlobalSettings =
     TxpGlobalSettings
     { tgsVerifyBlocks = verifyBlocks
-    , tgsApplyBlocks = undefined -- applyBlocksWith applyBlocksSettings
+    , tgsApplyBlocks = applyBlocksWith applyBlocksSettings
     , tgsRollbackBlocks = rollbackBlocks
     }
 
@@ -86,54 +86,73 @@ verifyBlocks verifyAllIsKnown newChain = runExceptT $ do
     convertPayload (ComponentBlockMain _ payload) = flattenTxPayload payload
     convertPayload (ComponentBlockGenesis _)      = []
 
-data ApplyBlocksSettings extra m = ApplyBlocksSettings
-    { absApplySingle     :: TxpBlund -> m ()
-    , absExtraOperations :: extra -> SomeBatchOp
+data ApplyBlocksSettings extraState m = ApplyBlocksSettings
+    { absApplySingle :: m ((GlobalToilState, extraState) -> TxpBlund -> m ( GlobalToilState
+                                                                          , extraState))
+    , absExtraOperations :: extraState -> SomeBatchOp
     }
 
--- applyBlocksSettings
---     :: GlobalApplyToilMode m
---     => ApplyBlocksSettings () m
--- applyBlocksSettings =
---     ApplyBlocksSettings
---     { absApplySingle = applyToil . blundToAuxNUndo
---     , absExtraOperations = const mempty
---     }
-
--- applyBlocksWith
---     :: (TxpGlobalApplyMode ctx m, Default extra)
---     => ApplyBlocksSettings extra (ToilT extra (DBToil m))
---     -> OldestFirst NE TxpBlund
---     -> m SomeBatchOp
--- applyBlocksWith ApplyBlocksSettings {..} blunds = do
---     let blocks = map fst blunds
---     inAssertMode $ do
---         verdict <- verifyBlocks False blocks
---         whenLeft verdict $
---             assertionFailed .
---             sformat ("we are trying to apply txp blocks which we fail to verify: "%build)
---     genericToilModifierToBatch absExtraOperations . snd <$>
---         runToilAction (mapM absApplySingle blunds)
-
-rollbackBlocks ::
-       forall m. TxpGlobalRollbackMode m
-    => NewestFirst NE TxpBlund
-    -> m SomeBatchOp
-rollbackBlocks blunds =
-    globalToilStateToBatch <$> foldM rollbackStep defGlobalToilState blunds
+applyBlocksSettings ::
+       forall ctx m. TxpGlobalApplyMode ctx m
+    => ApplyBlocksSettings () m
+applyBlocksSettings =
+    ApplyBlocksSettings
+        { absApplySingle =
+              do totalStake <- DB.getRealTotalStake
+                 return $ applyStep totalStake
+        , absExtraOperations = const mempty
+        }
   where
-    rollbackStep :: GlobalToilState -> TxpBlund -> m GlobalToilState
-    rollbackStep gts txpBlund = do
+    applyStep ::
+           Coin -> (GlobalToilState, ()) -> TxpBlund -> m (GlobalToilState, ())
+    applyStep totalStake (gts, ()) txpBlund = (, ()) <$> do
         let txAuxesAndUndos = blundToAuxNUndo txpBlund
             txAuxes = fst <$> txAuxesAndUndos
-        totalStake <- DB.getRealTotalStake
         baseUtxo <- utxoToLookup <$> buildUtxo (gts ^. gtsUtxoModifier) txAuxes
         let env =
                 GlobalToilEnv
                 { _gteUtxo = baseUtxo
                 , _gteTotalStake = totalStake
                 }
-        snd <$> runGlobalToilM env gts DB.getRealStake (rollbackToil txAuxesAndUndos)
+        execGlobalToilM env gts DB.getRealStake (applyToil txAuxesAndUndos)
+
+applyBlocksWith ::
+       (TxpGlobalApplyMode ctx m, Default extra)
+    => ApplyBlocksSettings extra m
+    -> OldestFirst NE TxpBlund
+    -> m SomeBatchOp
+applyBlocksWith ApplyBlocksSettings {..} blunds = do
+    let blocks = map fst blunds
+    inAssertMode $ do
+        verdict <- verifyBlocks False blocks
+        whenLeft verdict $
+            assertionFailed .
+            sformat ("we are trying to apply txp blocks which we fail to verify: "%build)
+    let toBatchOp (gts, extra) =
+            globalToilStateToBatch gts <> absExtraOperations extra
+    applyStep <- absApplySingle
+    toBatchOp <$> foldM applyStep (defGlobalToilState, def) blunds
+
+rollbackBlocks ::
+       forall m. TxpGlobalRollbackMode m
+    => NewestFirst NE TxpBlund
+    -> m SomeBatchOp
+rollbackBlocks blunds = do
+    totalStake <- DB.getRealTotalStake
+    globalToilStateToBatch <$>
+        foldM (rollbackStep totalStake) defGlobalToilState blunds
+  where
+    rollbackStep :: Coin -> GlobalToilState -> TxpBlund -> m GlobalToilState
+    rollbackStep totalStake gts txpBlund = do
+        let txAuxesAndUndos = blundToAuxNUndo txpBlund
+            txAuxes = fst <$> txAuxesAndUndos
+        baseUtxo <- utxoToLookup <$> buildUtxo (gts ^. gtsUtxoModifier) txAuxes
+        let env =
+                GlobalToilEnv
+                { _gteUtxo = baseUtxo
+                , _gteTotalStake = totalStake
+                }
+        execGlobalToilM env gts DB.getRealStake (rollbackToil txAuxesAndUndos)
 
 ----------------------------------------------------------------------------
 -- Helpers

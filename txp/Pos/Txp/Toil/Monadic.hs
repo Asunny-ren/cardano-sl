@@ -32,6 +32,7 @@ module Pos.Txp.Toil.Monadic
        , GlobalToilEnv (..)
        , GlobalToilM
        , runGlobalToilM
+       , execGlobalToilM
        , getStake
        , getTotalStake
        , setStake
@@ -178,6 +179,16 @@ runGlobalToilM env gts stakeGetter =
     foldFree' =
         foldFree $ \case
             StakesLookupF sId f -> f <$> stakeGetter sId
+
+-- | Version of 'runGlobalToilM' which discards action's result.
+execGlobalToilM ::
+       forall m a. (WithLogger m)
+    => GlobalToilEnv
+    -> GlobalToilState
+    -> (StakeholderId -> m (Maybe Coin))
+    -> GlobalToilM a
+    -> m GlobalToilState
+execGlobalToilM = fmap snd ... runGlobalToilM
 
 getStake :: StakeholderId -> GlobalToilM (Maybe Coin)
 getStake id =
