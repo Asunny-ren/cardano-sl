@@ -8,21 +8,23 @@ import           Universum
 
 import qualified Data.HashMap.Strict as HM
 
-import           Pos.Core (ComponentBlock (..), HasConfiguration, HeaderHash, SlotId (..),
+import           Pos.Core (Coin, ComponentBlock (..), HasConfiguration, HeaderHash, SlotId (..),
                            epochIndexL, headerHash, headerSlotL)
 import           Pos.Core.Txp (TxAux, TxUndo)
 import           Pos.DB (SomeBatchOp (..))
 import qualified Pos.DB.GState.Stakes as DB
-import           Pos.Slotting (MonadSlots, getSlotStart)
-import           Pos.Txp (ApplyBlocksSettings (..), TxpBlund, TxpGlobalApplyMode,
-                          TxpGlobalRollbackMode, TxpGlobalSettings (..), applyBlocksWith,
-                          blundToAuxNUndo, txpGlobalSettings)
+import           Pos.Slotting (getSlotStart)
+import           Pos.Txp (ApplyBlocksSettings (..), GlobalToilEnv (..), GlobalToilState, TxpBlund,
+                          TxpGlobalApplyMode, TxpGlobalRollbackMode, TxpGlobalSettings (..),
+                          applyBlocksWith, blundToAuxNUndo, buildUtxo, gtsUtxoModifier,
+                          txpGlobalSettings, utxoToLookup)
 import           Pos.Util.Chrono (NE, NewestFirst (..))
 import qualified Pos.Util.Modifier as MM
 
 import qualified Pos.Explorer.DB as GS
-import           Pos.Explorer.Txp.Toil (ExplorerExtraLookup (..), ExplorerExtraModifier (..),
-                                        eApplyToil, eRollbackToil)
+import           Pos.Explorer.Txp.Common (buildExplorerExtraLookup)
+import           Pos.Explorer.Txp.Toil (EGlobalToilM, ExplorerExtraLookup (..),
+                                        ExplorerExtraModifier (..), eApplyToil, eRollbackToil)
 
 
 -- | Settings used for global transactions data processing used by explorer.
@@ -35,22 +37,19 @@ explorerTxpGlobalSettings =
     }
 
 eApplyBlocksSettings ::
-       TxpGlobalApplyMode ctx m => ApplyBlocksSettings ExplorerExtraModifier m
+       TxpGlobalApplyMode ctx m
+    => ApplyBlocksSettings ExplorerExtraLookup ExplorerExtraModifier m
 eApplyBlocksSettings =
     ApplyBlocksSettings
-        { absApplySingle =
-              do totalStake <- DB.getRealTotalStake
-                 return $ applyStep totalStake
+        { absApplySingle = applySingle
+        , absCreateEnv = buildExplorerExtraLookup
         , absExtraOperations = extraOps
         }
 
-applyStep ::
+applySingle ::
        forall ctx m. (HasConfiguration, TxpGlobalApplyMode ctx m)
-    => Coin
-    -> (GlobalToilState, ExplorerExtraModifier)
-    -> TxpBlund
-    -> m (GlobalToilState, ExplorerExtraModifier)
-applyStep totalStake (gts, eem) txpBlund = do
+    => TxpBlund -> m (EGlobalToilM ())
+applySingle txpBlund = do
     -- @TxpBlund@ is a block/blund with a reduced set of information required for
     -- transaction processing. We use it to determine at which slot did a transaction
     -- occur. TxpBlund has TxpBlock inside. If it's Left, it's a genesis block which
@@ -72,8 +71,8 @@ applyStep totalStake (gts, eem) txpBlund = do
     -- Get the timestamp from that information.
     mTxTimestamp <- getSlotStart slotId
 
-    undefined
-    -- uncurry (eApplyToil mTxTimestamp) $ blundToAuxNUndoWHash txpBlund
+    let (txAuxesAndUndos, hHash) = blundToAuxNUndoWHash txpBlund
+    return $ eApplyToil mTxTimestamp txAuxesAndUndos hHash
 
 -- rollbackBlocks
 --     :: TxpGlobalRollbackMode m

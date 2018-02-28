@@ -34,15 +34,16 @@ import           Control.Monad.Free (Free (..))
 import           Control.Monad.Morph (generalize, hoist)
 import           Control.Monad.Reader (mapReaderT)
 import           Control.Monad.State.Strict (mapStateT)
-import           System.Wlog (NamedPureLogger)
+import           System.Wlog (NamedPureLogger, WithLogger)
 
-import           Pos.Core (Address, Coin, TxId)
+import           Pos.Core (Address, Coin, StakeholderId, TxId)
 import           Pos.Explorer.Core (AddrHistory, TxExtra)
 import           Pos.Explorer.Txp.Toil.Types (ExplorerExtraLookup (..), ExplorerExtraModifier,
                                               eemAddrBalances, eemAddrHistories, eemLocalTxsExtra,
                                               eemNewUtxoSum)
-import           Pos.Txp.Toil (GlobalToilEnv, GlobalToilM, GlobalToilState, LocalToilM,
-                               LocalToilState, StakesLookupF, UtxoLookup)
+import           Pos.Txp.Toil (ExtendedGlobalToilM, GlobalToilEnv, GlobalToilM, GlobalToilState,
+                               LocalToilM, LocalToilState, StakesLookupF, UtxoLookup,
+                               runGlobalToilMBase)
 import qualified Pos.Util.Modifier as MM
 
 ----------------------------------------------------------------------------
@@ -111,10 +112,7 @@ localToilMToELocalToilM = mapReaderT (mapStateT lift . zoom _1) . magnify _1
 ----------------------------------------------------------------------------
 
 type EGlobalToilM
-     = ReaderT (GlobalToilEnv, ExplorerExtraLookup) (
-       StateT (GlobalToilState, ExplorerExtraModifier) (
-       NamedPureLogger (
-       Free StakesLookupF)))
+     = ExtendedGlobalToilM ExplorerExtraLookup ExplorerExtraModifier
 
 explorerExtraMToEGlobalToilM :: ExplorerExtraM a -> EGlobalToilM a
 explorerExtraMToEGlobalToilM = mapReaderT (mapStateT f . zoom _2) . magnify _2
@@ -123,4 +121,23 @@ explorerExtraMToEGlobalToilM = mapReaderT (mapStateT f . zoom _2) . magnify _2
     f = hoist generalize
 
 globalToilMToEGlobalToilM :: GlobalToilM a -> EGlobalToilM a
-globalToilMToEGlobalToilM = mapReaderT (zoom _1) . magnify _1
+globalToilMToEGlobalToilM = zoom _1 . magnify _1
+
+-- runEGlobalToilM ::
+--        forall m a. (WithLogger m)
+--     => (GlobalToilEnv, ExplorerExtraLookup)
+--     -> (GlobalToilState, ExplorerExtraModifier)
+--     -> (StakeholderId -> m (Maybe Coin))
+--     -> EGlobalToilM a
+--     -> m (a, (GlobalToilState, ExplorerExtraModifier))
+-- runEGlobalToilM env st stakeGetter =
+--     runGlobalToilMBase stakeGetter . usingStateT st . usingReaderT env
+
+-- execEGlobalToilM ::
+--        forall m a. (WithLogger m)
+--     => (GlobalToilEnv, ExplorerExtraLookup)
+--     -> (GlobalToilState, ExplorerExtraModifier)
+--     -> (StakeholderId -> m (Maybe Coin))
+--     -> EGlobalToilM a
+--     -> m (GlobalToilState, ExplorerExtraModifier)
+-- execEGlobalToilM = fmap snd ... runEGlobalToilM

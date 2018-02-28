@@ -30,7 +30,10 @@ module Pos.Txp.Toil.Monadic
        , gtsStakesView
        , defGlobalToilState
        , GlobalToilEnv (..)
+       , GlobalToilMBase
        , GlobalToilM
+       , ExtendedGlobalToilM
+       , runGlobalToilMBase
        , runGlobalToilM
        , execGlobalToilM
        , getStake
@@ -160,8 +163,33 @@ data GlobalToilEnv = GlobalToilEnv
 
 makeLenses ''GlobalToilEnv
 
+type GlobalToilMBase = NamedPureLogger (Free StakesLookupF)
+
 type GlobalToilM
-     = ReaderT GlobalToilEnv (StateT GlobalToilState (NamedPureLogger (Free StakesLookupF)))
+     = ReaderT GlobalToilEnv (StateT GlobalToilState GlobalToilMBase)
+
+-- | Extended version of 'GlobalToilM'. It allows to put extra data
+-- into reader context and extra state. It's needed for explorer which
+-- has more complicated transaction processing.
+type ExtendedGlobalToilM extraEnv extraState =
+    ReaderT (GlobalToilEnv, extraEnv) (
+        StateT (GlobalToilState, extraState) (
+            GlobalToilMBase
+    ))
+
+-- | Run given action in some monad capable of getting stakeholders'
+-- stakes and logging.
+runGlobalToilMBase ::
+       forall m a. (WithLogger m)
+    => (StakeholderId -> m (Maybe Coin))
+    -> GlobalToilMBase a
+    -> m a
+runGlobalToilMBase stakeGetter = launchNamedPureLog foldFree'
+  where
+    foldFree' :: forall x. Free StakesLookupF x -> m x
+    foldFree' =
+        foldFree $ \case
+            StakesLookupF sId f -> f <$> stakeGetter sId
 
 -- | Run 'GlobalToilM' action in some monad capable of getting
 -- stakeholders' stakes and logging.
@@ -173,12 +201,7 @@ runGlobalToilM ::
     -> GlobalToilM a
     -> m (a, GlobalToilState)
 runGlobalToilM env gts stakeGetter =
-    launchNamedPureLog foldFree' . usingStateT gts . usingReaderT env
-  where
-    foldFree' :: forall x. Free StakesLookupF x -> m x
-    foldFree' =
-        foldFree $ \case
-            StakesLookupF sId f -> f <$> stakeGetter sId
+    runGlobalToilMBase stakeGetter . usingStateT gts . usingReaderT env
 
 -- | Version of 'runGlobalToilM' which discards action's result.
 execGlobalToilM ::
