@@ -8,17 +8,15 @@ import           Universum
 
 import qualified Data.HashMap.Strict as HM
 
-import           Pos.Core (Coin, ComponentBlock (..), HasConfiguration, HeaderHash, SlotId (..),
+import           Pos.Core (ComponentBlock (..), HasConfiguration, HeaderHash, SlotId (..),
                            epochIndexL, headerHash, headerSlotL)
 import           Pos.Core.Txp (TxAux, TxUndo)
 import           Pos.DB (SomeBatchOp (..))
-import qualified Pos.DB.GState.Stakes as DB
 import           Pos.Slotting (getSlotStart)
-import           Pos.Txp (ApplyBlocksSettings (..), GlobalToilEnv (..), GlobalToilState, TxpBlund,
-                          TxpGlobalApplyMode, TxpGlobalRollbackMode, TxpGlobalSettings (..),
-                          applyBlocksWith, blundToAuxNUndo, buildUtxo, gtsUtxoModifier,
-                          txpGlobalSettings, utxoToLookup)
-import           Pos.Util.Chrono (NE, NewestFirst (..))
+import           Pos.Txp (ProcessBlundsSettings (..), TxpBlund, TxpGlobalApplyMode,
+                          TxpGlobalRollbackMode, TxpGlobalSettings (..), applyBlocksWith,
+                          blundToAuxNUndo, processBlunds, txpGlobalSettings)
+import           Pos.Util.Chrono (NewestFirst (..))
 import qualified Pos.Util.Modifier as MM
 
 import qualified Pos.Explorer.DB as GS
@@ -26,24 +24,33 @@ import           Pos.Explorer.Txp.Common (buildExplorerExtraLookup)
 import           Pos.Explorer.Txp.Toil (EGlobalToilM, ExplorerExtraLookup (..),
                                         ExplorerExtraModifier (..), eApplyToil, eRollbackToil)
 
-
 -- | Settings used for global transactions data processing used by explorer.
 explorerTxpGlobalSettings :: HasConfiguration => TxpGlobalSettings
 explorerTxpGlobalSettings =
     -- verification is same
     txpGlobalSettings
-    { tgsApplyBlocks = applyBlocksWith eApplyBlocksSettings
-    , tgsRollbackBlocks = undefined -- rollbackBlocks
+    { tgsApplyBlocks = applyBlocksWith applySettings
+    , tgsRollbackBlocks = processBlunds rollbackSettings . getNewestFirst
     }
 
-eApplyBlocksSettings ::
+applySettings ::
        TxpGlobalApplyMode ctx m
-    => ApplyBlocksSettings ExplorerExtraLookup ExplorerExtraModifier m
-eApplyBlocksSettings =
-    ApplyBlocksSettings
-        { absApplySingle = applySingle
-        , absCreateEnv = buildExplorerExtraLookup
-        , absExtraOperations = extraOps
+    => ProcessBlundsSettings ExplorerExtraLookup ExplorerExtraModifier m
+applySettings =
+    ProcessBlundsSettings
+        { pbsProcessSingle = applySingle
+        , pbsCreateEnv = buildExplorerExtraLookup
+        , pbsExtraOperations = extraOps
+        }
+
+rollbackSettings ::
+       TxpGlobalRollbackMode m
+    => ProcessBlundsSettings ExplorerExtraLookup ExplorerExtraModifier m
+rollbackSettings =
+    ProcessBlundsSettings
+        { pbsProcessSingle = return . eRollbackToil . blundToAuxNUndo
+        , pbsCreateEnv = buildExplorerExtraLookup
+        , pbsExtraOperations = extraOps
         }
 
 applySingle ::
@@ -73,13 +80,6 @@ applySingle txpBlund = do
 
     let (txAuxesAndUndos, hHash) = blundToAuxNUndoWHash txpBlund
     return $ eApplyToil mTxTimestamp txAuxesAndUndos hHash
-
--- rollbackBlocks
---     :: TxpGlobalRollbackMode m
---     => NewestFirst NE TxpBlund -> m SomeBatchOp
--- rollbackBlocks blunds =
---     (genericToilModifierToBatch extraOps) . snd <$>
---     runToilAction (mapM (eRollbackToil . blundToAuxNUndo) blunds)
 
 extraOps :: HasConfiguration => ExplorerExtraModifier -> SomeBatchOp
 extraOps (ExplorerExtraModifier em (HM.toList -> histories) balances utxoNewSum) =
