@@ -25,6 +25,14 @@ import           Test.Tasty
 import           Test.Tasty.QuickCheck
 import           Universum
 
+--------------------------------------------------------------------------------
+-- Reverse migrations
+--
+-- These instances serve to allow us to migrate _backwards_ from the current DB
+-- version to the previous one. The purpose of this is to verify that the
+-- migration does not introduce unwanted changes to the database.
+--------------------------------------------------------------------------------
+
 instance Migrate AddressInfo_v0 where
   type MigrateFrom AddressInfo_v0 = AddressInfo
   migrate AddressInfo{..} = AddressInfo_v0
@@ -68,6 +76,7 @@ instance Migrate WalletStorage_Back_v2 where
     where
       mapAddrKeys = HM.fromList . fmap (first addressToCId) . HM.toList
 
+--------------------------------------------------------------------------------
 
 deriving instance Eq CTxMeta
 deriving instance Eq CAccountMeta
@@ -200,6 +209,9 @@ tests = testGroup "Migration"
     [ testProperty "migration to latest version can be reversed" $ prop_backMigrate
     ]
   where
+    -- This test verifies that the migration to version 2 of the wallet storage is
+    -- reversible, and as such that we don't accidentally cause any data loss in
+    -- the conversion.
     prop_backMigrate :: WalletStorage_v2 -> Bool
     prop_backMigrate ws = let
         WalletStorage_Back_v2 ws' = migrate . migrate $ ws
