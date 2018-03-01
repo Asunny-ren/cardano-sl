@@ -57,6 +57,7 @@ module Cardano.Wallet.API.V1.Types (
 
 import           Universum
 
+import qualified Control.Lens as Lens
 import           Data.Aeson
 import           Data.Aeson.TH
 import           Data.Aeson.Types (typeMismatch)
@@ -108,6 +109,8 @@ import qualified Pos.Crypto.Signing as Core
 --
 -- 1. Never define an instance on the inner type 'a'. Do it only on 'V1 a'.
 newtype V1 a = V1 a deriving (Eq, Ord)
+
+Lens.makePrisms ''V1
 
 instance Show a => Show (V1 a) where
     show (V1 a) = Prelude.show a
@@ -204,6 +207,18 @@ instance FromHttpApiData (V1 Core.Address) where
 
 instance ToHttpApiData (V1 Core.Address) where
     toQueryParam (V1 a) = sformat build a
+
+-- | Represent as number of seconds with precision up to microseconds.
+-- Example: @1519923192.346258@.
+instance ToJSON (V1 Core.Timestamp) where
+    toJSON timestamp = Number $ view (_V1 . Core.timestampSeconds) timestamp
+
+instance FromJSON (V1 Core.Timestamp) where
+    parseJSON = withScientific "V1 timestamp" $ \n ->
+        pure . V1 $ view (Lens.from Core.timestampSeconds) n
+
+instance Arbitrary (V1 Core.Timestamp) where
+    arbitrary = fmap V1 arbitrary
 
 --
 -- Domain-specific types, mostly placeholders.
@@ -541,16 +556,19 @@ data Transaction = Transaction
     -- ^ The input money distribution.
   , txOutputs       :: !(NonEmpty PaymentDistribution)
     -- ^ The output money distribution.
-  , txType          :: TransactionType
+  , txType          :: !TransactionType
     -- ^ The type for this transaction (e.g local, foreign, etc).
-  , txDirection     :: TransactionDirection
+  , txDirection     :: !TransactionDirection
     -- ^ The direction for this transaction (e.g incoming, outgoing).
+  , txTimestamp     :: !(V1 Core.Timestamp)
+    -- ^ The time when transaction was created.
   } deriving (Show, Ord, Eq, Generic)
 
 deriveToJSON Serokell.defaultOptions ''Transaction
 
 instance Arbitrary Transaction where
   arbitrary = Transaction <$> arbitrary
+                          <*> arbitrary
                           <*> arbitrary
                           <*> arbitrary
                           <*> arbitrary
@@ -608,7 +626,7 @@ instance ToJSON (V1 Core.ApplicationName) where
 
 instance FromJSON (V1 Core.ApplicationName) where
     parseJSON (String svAppName) = pure (V1 (Core.ApplicationName svAppName))
-    parseJSON x = typeMismatch "Not a valid ApplicationName" x
+    parseJSON x                  = typeMismatch "Not a valid ApplicationName" x
 
 instance ToJSON (V1 Core.SoftwareVersion) where
     toJSON (V1 Core.SoftwareVersion{..}) =
